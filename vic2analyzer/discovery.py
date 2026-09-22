@@ -19,7 +19,7 @@ import sys
 import glob
 from typing import List, Optional
 
-__all__ = ["find_install", "find_save_dirs", "list_saves", "config_path", "load_config", "save_config"]
+__all__ = ["find_install", "find_save_dirs", "list_saves", "config_path", "load_config", "save_config", "paradox_victoria2_dir"]
 
 APP_NAME = "vic2-mistral-analyzer"
 
@@ -179,6 +179,16 @@ def _doc_dir() -> str:
             return candidate
     return home
 
+
+def paradox_victoria2_dir() -> str:
+    """The Documents/Paradox Interactive/Victoria II folder, if it exists."""
+    paradox = os.path.join(_doc_dir(), "Paradox Interactive")
+    for name in ("Victoria II", "Victoria 2", "Victoria II - A House Divided",
+                 "Victoria II - A House Divided - Heart of Darkness"):
+        path = os.path.join(paradox, name)
+        if os.path.isdir(path):
+            return path
+    return paradox
 
 def find_save_dirs(install_dir: Optional[str] = None) -> List[str]:
     """All plausible 'save games' directories for Victoria II."""

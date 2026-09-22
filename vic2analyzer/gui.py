@@ -100,7 +100,7 @@ INCOME_LABELS = {
     "taxes_poor": "Poor tax", "taxes_middle": "Middle tax", "taxes_rich": "Rich tax",
     "tariffs": "Tariffs", "gold": "Gold", "national_stockpile": "Stockpile sales",
     "industry_subsidies": "Industry subsidies", "education": "Education",
-    "administration": "Administration", "military": "Military",
+    "administration": "Administration", "war_subsidies": "War subsidies",
 }
 
 EXPENSE_LABELS = {
@@ -127,6 +127,7 @@ class App(tk.Tk):
 
         self.game_files: Optional[GameFiles] = None
         self.analyzers: Dict[str, SaveAnalyzer] = {}
+        self.selected_country_tag: Optional[str] = None
         self._photo_refs: List[object] = []
         self._worker: Optional[threading.Thread] = None
 
@@ -221,8 +222,12 @@ class App(tk.Tk):
         self._rescan()
 
     def _choose_save(self):
+        initial = discovery.paradox_victoria2_dir()
+        if not os.path.isdir(initial):
+            initial = os.path.dirname(initial) if os.path.isdir(os.path.dirname(initial)) else None
         paths = filedialog.askopenfilenames(
             title="Select .v2 save game(s)",
+            initialdir=initial,
             filetypes=[("Victoria II saves", "*.v2 *.v2e"), ("All files", "*.*")],
         )
         for path in paths:
@@ -537,12 +542,13 @@ class WarsTab(tk.Frame):
         self._flags_row.pack(fill="x", padx=8, pady=4)
         detail_cols = tk.Frame(detail, bg=PANEL)
         detail_cols.pack(fill="x", padx=8, pady=(0, 8))
-        self._detail_label = tk.Label(detail_cols, text="", justify="left", anchor="w", fg=FG, bg=PANEL,
-                                     font=("Georgia", 10))
+        self._detail_label = tk.Text(detail_cols, height=10, wrap="word", bg=PANEL, fg=FG,
+                                     font=("Georgia", 10), relief="flat", cursor="arrow",
+                                     highlightthickness=0, padx=4, pady=2)
         self._detail_label.pack(side="left", fill="both", expand=True)
-        self._goals_label = tk.Label(detail_cols, text="", justify="left", anchor="nw", fg=FG, bg=PANEL,
-                                     font=("Georgia", 10), width=44, wraplength=380)
-        self._goals_label.pack(side="left", fill="y", padx=(16, 0))
+        self._battle_panel = tk.Label(detail_cols, text="", justify="left", anchor="nw", fg=FG, bg=PANEL2,
+                                      font=("Georgia", 9), width=46, wraplength=340)
+        self._battle_panel.pack(side="left", fill="y", padx=(16, 0))
 
     # ------------------------------------------------------------- sorting
 
@@ -583,6 +589,7 @@ class WarsTab(tk.Frame):
     def _populate(self):
         for item in self._tree.get_children():
             self._tree.delete(item)
+        self._battles = []
         for col in self.COLUMNS:
             self._tree.heading(col, text=self._heading_text(col))
         wars = list(self._wars)
@@ -607,8 +614,10 @@ class WarsTab(tk.Frame):
             ))
         self._clear_flags_row()
         self._detail_title.config(text="Select a war to see its details.")
-        self._detail_label.config(text="")
-        self._goals_label.config(text="")
+        self._detail_label.config(state="normal")
+        self._detail_label.delete("1.0", "end")
+        self._detail_label.config(state="disabled")
+        self._battle_panel.config(text="")
 
     def _side_names(self, tags: List[str], original: str) -> str:
         if tags:
@@ -653,34 +662,53 @@ class WarsTab(tk.Frame):
         for tag in defenders:
             self._add_flag_chip(self._flags_row, tag, highlight=(tag == war.original_defender))
 
-    def _render_goals(self, war) -> None:
-        if not war.goals:
-            if war.is_current:
-                self._goals_label.config(text="")
-            else:
-                self._goals_label.config(text="Peace: no goals recorded.")
-            return
+    def _render_battle_list(self, war) -> None:
+        self._battles = sorted(war.battles, key=lambda b: b.total_losses, reverse=True)[:8]
+        txt = self._detail_label
+        txt.config(state="normal")
+        txt.delete("1.0", "end")
+        txt.tag_configure("head", foreground=ACCENT, font=("Georgia", 10, "bold"))
+        for idx, b in enumerate(self._battles):
+            tag = f"battle{idx}"
+            won_color = "#3a6b35" if b.attacker_won else "#7a3a2a"
+            txt.tag_configure(tag, foreground="#2a4a7a",
+                              font=("Georgia", 9, "underline"))
+            txt.tag_bind(tag, "<Enter>", lambda e, t=tag: txt.tag_config(t, background=PANEL2))
+            txt.tag_bind(tag, "<Leave>", lambda e, t=tag: txt.tag_config(t, background=PANEL))
+            txt.tag_bind(tag, "<Button-1>",
+                         lambda e, b=b: self._render_battle_details(b))
+        txt.insert("end", f"{len(war.battles)} battles — click one for details:\n\n", "head")
+        for idx, b in enumerate(self._battles):
+            winner = self._app.country_label(b.attacker) if b.attacker_won else self._app.country_label(b.defender)
+            txt.insert("end", "  ", () )
+            txt.insert("end", f"{b.date.replace('.', '/')} {b.name}", f"battle{idx}")
+            txt.insert("end",
+                       f": {self._app.country_label(b.attacker)} lost {vfmt(b.attacker_losses)} vs "
+                       f"{self._app.country_label(b.defender)} lost {vfmt(b.defender_losses)} — {winner} won\n")
+        txt.insert("end", f"\nTotal losses: attacker {vfmt(war.attacker_losses)} / defender {vfmt(war.defender_losses)}")
+        txt.config(state="disabled")
+
+    def _render_battle_details(self, b) -> None:
         gf = self._app.game_files
-        lines = []
-        heading = "War goals" + ("" if war.is_current else " (peace terms)")
-        lines.append(heading + ":")
-        for g in war.goals:
-            cb = g.casus_belli.replace("_", " ")
-            if gf is not None:
-                cb = gf.display_name(g.casus_belli) or cb
-            parts = [f"{g.date.replace('.', '/')} — {cb}"]
-            actor = self._app.country_label(g.actor) if g.actor and g.actor != "---" else "?"
-            receiver = self._app.country_label(g.receiver) if g.receiver and g.receiver != "---" else "?"
-            parts.append(f"{actor} → {receiver}")
-            if g.state_province_id and gf is not None:
-                parts.append(gf.province_name(g.state_province_id))
-            elif g.state_province_id:
-                parts.append(f"state {g.state_province_id}")
-            lines.append("  " + ", ".join(parts))
-        if not war.is_current:
-            lines.append("")
-            lines.append("Victoria II saves do not record the accepted peace deal; goals show what was demanded.")
-        self._goals_label.config(text="\n".join(lines))
+        loc = gf.province_name(b.location) if gf is not None else f"Province {b.location}"
+        winner = self._app.country_label(b.attacker) if b.attacker_won else self._app.country_label(b.defender)
+        att_share = b.attacker_losses / b.attacker_forces if b.attacker_forces else 0.0
+        def_share = b.defender_losses / b.defender_forces if b.defender_forces else 0.0
+        lines = [
+            f"⚔ {b.name} ({b.date.replace('.', '/')})",
+            f"Location: {loc}",
+            "",
+            f"{self._app.country_label(b.attacker)}",
+            f"  Commander: {b.attacker_leader}",
+            f"  Forces: {vfmt(b.attacker_forces)}  Losses: {vfmt(b.attacker_losses)} ({att_share:.0%})",
+            "",
+            f"{self._app.country_label(b.defender)}",
+            f"  Commander: {b.defender_leader}",
+            f"  Forces: {vfmt(b.defender_forces)}  Losses: {vfmt(b.defender_losses)} ({def_share:.0%})",
+            "",
+            f"Victory: {winner}",
+        ]
+        self._battle_panel.config(text="\n".join(lines))
 
     def _on_select_war(self, _event=None):
         selection = self._tree.selection()
@@ -695,24 +723,16 @@ class WarsTab(tk.Frame):
             f"({(war.start_date or '?').replace('.', '/')} – {(war.end_date or war.action or '?').replace('.', '/')})"
         ))
         self._render_flags_row(war)
-        self._render_goals(war)
         if not war.battles:
-            self._detail_label.config(text=(
+            self._detail_label.config(state="normal")
+            self._detail_label.delete("1.0", "end")
+            self._detail_label.insert("end",
                 "No battles — the war ended without armies meeting in the field "
-                "(common for colonial and concession wars)."
-            ))
+                "(common for colonial and concession wars).")
+            self._detail_label.config(state="disabled")
+            self._battle_panel.config(text="")
             return
-        biggest = sorted(war.battles, key=lambda b: b.total_losses, reverse=True)[:8]
-        lines = [f"{len(war.battles)} battles — deadliest:", ""]
-        for b in biggest:
-            lines.append(
-                f"  {b.date.replace('.', '/')} {b.name}: {self._app.country_label(b.attacker)} vs "
-                f"{self._app.country_label(b.defender)} — losses {vfmt(b.attacker_losses)} vs {vfmt(b.defender_losses)}"
-                f" ({'attacker' if b.attacker_won else 'defender'} won)"
-            )
-        lines.append("")
-        lines.append(f"Total recorded losses: attacker {vfmt(war.attacker_losses)} / defender {vfmt(war.defender_losses)}")
-        self._detail_label.config(text="\n".join(lines))
+        self._render_battle_list(war)
 
 
 class PopulationTab(tk.Frame, _ChartMixin):
@@ -726,7 +746,7 @@ class PopulationTab(tk.Frame, _ChartMixin):
         tk.Label(top, text="Population", font=("Georgia", 16, "bold"), fg=ACCENT, bg=BG).pack(side="left")
         self._selector = ttk.Combobox(top, state="readonly", width=40)
         self._selector.pack(side="left", padx=10)
-        self._selector.bind("<<ComboboxSelected>>", lambda e: self._draw())
+        self._selector.bind("<<ComboboxSelected>>", self._on_country_selected)
 
         info = tk.Frame(self, bg=PANEL)
         info.pack(fill="x", padx=8, pady=4)
@@ -748,16 +768,19 @@ class PopulationTab(tk.Frame, _ChartMixin):
         self._wealth_panel.pack(side="left", fill="both", expand=True, padx=(4, 0))
         tk.Label(self._wealth_panel, text="Wealthiest & poorest POPs", fg=ACCENT, bg=PANEL,
                  font=("Georgia", 11, "bold")).pack(anchor="w", padx=6, pady=(4, 0))
-        self._wealth_rich = tk.Label(self._wealth_panel, text="", justify="left", anchor="w",
-                                     fg=FG, bg=PANEL, font=("Georgia", 9))
-        self._wealth_rich.pack(anchor="w", padx=6, pady=2)
-        self._wealth_poor = tk.Label(self._wealth_panel, text="", justify="left", anchor="w",
-                                    fg=FG, bg=PANEL, font=("Georgia", 9))
-        self._wealth_poor.pack(anchor="w", padx=6, pady=(2, 6))
+        self._wealth_rich = tk.Frame(self._wealth_panel, bg=PANEL)
+        self._wealth_rich.pack(anchor="w", fill="x", padx=6, pady=2)
+        self._wealth_poor = tk.Frame(self._wealth_panel, bg=PANEL)
+        self._wealth_poor.pack(anchor="w", fill="x", padx=6, pady=(2, 6))
 
         self._issues_label = tk.Label(self, text="", justify="left", anchor="w",
                                       fg=FG, bg=BG, font=("Georgia", 10))
         self._issues_label.pack(fill="x", padx=10, pady=(0, 4))
+
+    def _on_country_selected(self, _event=None):
+        if hasattr(self, "_tags") and 0 <= self._selector.current() < len(self._tags):
+            self._app.selected_country_tag = self._tags[self._selector.current()]
+        self._draw()
 
     def refresh(self):
         an = self._app.latest()
@@ -766,8 +789,12 @@ class PopulationTab(tk.Frame, _ChartMixin):
         tags = an.ordered_country_tags()
         self._tags = tags
         self._selector["values"] = [f"{self._app.country_label(t)} ({t})" for t in tags]
-        player_idx = tags.index(an.player) if an.player in tags else 0
-        self._selector.current(player_idx)
+        chosen = self._app.selected_country_tag
+        if chosen in tags:
+            idx = tags.index(chosen)
+        else:
+            idx = tags.index(an.player) if an.player in tags else 0
+        self._selector.current(idx)
         self._draw()
 
     @staticmethod
@@ -785,16 +812,34 @@ class PopulationTab(tk.Frame, _ChartMixin):
             return f"Unrest brewing — militancy {pop.militancy:.2f}, radicals {radical_share:.0%}"
         return ""
 
-    def _pop_line(self, entry, wealthiest: bool = False) -> str:
+    def _pop_parts(self, entry, wealthiest: bool = False) -> tuple:
         gf = self._app.game_files
         prov = gf.province_name(entry.province_id) if gf is not None else entry.province_id
-        line = (f"  {entry.pop_type.capitalize()} — {entry.culture.capitalize()} in {prov}: "
-                f"{vfmt(entry.size)} pops, {money_fmt(entry.money_per_pop)} each")
+        head = f"  {entry.pop_type.capitalize()} — {entry.culture.capitalize()} in {prov} "
+        tail = f" {vfmt(entry.size)} pops, {money_fmt(entry.money_per_pop)} each"
         if wealthiest:
-            line += f" ({money_fmt(entry.money_total)} total)"
+            tail += f" ({money_fmt(entry.money_total)} total)"
         else:
-            line += f", literacy {entry.literacy:.0%}, militancy {entry.militancy:.2f}"
-        return line
+            tail += f", literacy {entry.literacy:.0%}, militancy {entry.militancy:.2f}"
+        return head, tail
+
+    def _render_pop_rows(self, container, entries, wealthiest: bool):
+        for child in container.winfo_children():
+            child.destroy()
+        an = self._app.latest()
+        owners = an.province_owners() if an is not None else {}
+        for entry in entries:
+            row = tk.Frame(container, bg=PANEL)
+            row.pack(anchor="w", fill="x")
+            head, tail = self._pop_parts(entry, wealthiest=wealthiest)
+            tk.Label(row, text=head, fg=FG, bg=PANEL,
+                     font=("Georgia", 9)).pack(side="left")
+            tag = owners.get(entry.province_id)
+            photo = self._app.flag_photo(tag, size=(30, 20)) if tag else None
+            if photo is not None:
+                tk.Label(row, image=photo, bg=PANEL).pack(side="left", padx=2)
+            tk.Label(row, text=tail, fg=FG, bg=PANEL,
+                     font=("Georgia", 9)).pack(side="left")
 
     def _draw_pop_icons(self, ax, items, canvas):
         gf = self._app.game_files
@@ -813,7 +858,30 @@ class PopulationTab(tk.Frame, _ChartMixin):
             box = AnnotationBbox(
                 OffsetImage(_pil_to_array(img), resample=True),
                 (x, y), xycoords="data",
-                box_alignment=(1.0, 0.5), frameon=False)
+                box_alignment=(1.0, 0.5), frameon=False,
+                annotation_clip=False)
+            ax.add_artist(box)
+        canvas.draw()
+
+    def _draw_religion_icons(self, ax, items, canvas):
+        gf = self._app.game_files
+        if gf is None or not HAS_MPL or Image is None:
+            return
+        from matplotlib.offsetbox import AnnotationBbox, OffsetImage
+        renderer = canvas.get_renderer()
+        for row, (religion, _size) in enumerate(items):
+            tick = ax.get_yticklabels()[row]
+            extent = tick.get_window_extent(renderer=renderer)
+            x, y = ax.transData.inverted().transform(
+                (extent.x0 - 10, (extent.y0 + extent.y1) / 2.0))
+            img = gf.religion_icon(religion, size=(16, 16))
+            if img is None:
+                continue
+            box = AnnotationBbox(
+                OffsetImage(_pil_to_array(img), resample=True),
+                (x, y), xycoords="data",
+                box_alignment=(1.0, 0.5), frameon=False,
+                annotation_clip=False)
             ax.add_artist(box)
         canvas.draw()
 
@@ -880,13 +948,11 @@ class PopulationTab(tk.Frame, _ChartMixin):
                             fontsize=8, color=FG)
         fig.subplots_adjust(left=0.30)
         canvas.draw()
+        if religions:
+            self._draw_religion_icons(ax, religions, canvas)
 
-        rich_lines = ["Wealthiest POPs (money per pop):"]
-        rich_lines += [self._pop_line(e, wealthiest=True) for e in pop.richest[:5]]
-        self._wealth_rich.config(text="\n".join(rich_lines))
-        poor_lines = ["Poorest POPs (money per pop):"]
-        poor_lines += [self._pop_line(e) for e in pop.poorest[:5]]
-        self._wealth_poor.config(text="\n".join(poor_lines))
+        self._render_pop_rows(self._wealth_rich, pop.richest[:5], wealthiest=True)
+        self._render_pop_rows(self._wealth_poor, pop.poorest[:5], wealthiest=False)
 
         if pop.by_issues and gf is not None:
             names = gf.pop_issue_names()
@@ -916,7 +982,7 @@ class EconomyTab(tk.Frame, _ChartMixin):
         tk.Label(top, text="Economy", font=("Georgia", 16, "bold"), fg=ACCENT, bg=BG).pack(side="left")
         self._selector = ttk.Combobox(top, state="readonly", width=40)
         self._selector.pack(side="left", padx=10)
-        self._selector.bind("<<ComboboxSelected>>", lambda e: self._draw())
+        self._selector.bind("<<ComboboxSelected>>", self._on_country_selected)
 
         self._info = tk.Label(self, text="", justify="left", anchor="w", fg=FG, bg=BG,
                               font=("Georgia", 10))
@@ -936,6 +1002,11 @@ class EconomyTab(tk.Frame, _ChartMixin):
         self._fig_right = self.make_figure(charts, "Share of world production", figsize=(6, 5.4))
         self._fig_right[2].get_tk_widget().pack(side="left", fill="both", expand=True, padx=(4, 0))
 
+    def _on_country_selected(self, _event=None):
+        if hasattr(self, "_tags") and 0 <= self._selector.current() < len(self._tags):
+            self._app.selected_country_tag = self._tags[self._selector.current()]
+        self._draw()
+
     def refresh(self):
         an = self._app.latest()
         if an is None:
@@ -943,8 +1014,12 @@ class EconomyTab(tk.Frame, _ChartMixin):
         tags = an.ordered_country_tags()
         self._tags = tags
         self._selector["values"] = [f"{self._app.country_label(t)} ({t})" for t in tags]
-        player_idx = tags.index(an.player) if an.player in tags else 0
-        self._selector.current(player_idx)
+        chosen = self._app.selected_country_tag
+        if chosen in tags:
+            idx = tags.index(chosen)
+        else:
+            idx = tags.index(an.player) if an.player in tags else 0
+        self._selector.current(idx)
         self._draw()
 
     @staticmethod
@@ -971,10 +1046,17 @@ class EconomyTab(tk.Frame, _ChartMixin):
         net = sum(econ["incomes"].values()) - sum(econ["expenses"].values())
         rank = an.treasury_rank(tag)
         treasury = money_fmt(econ["money"]) + (f" #{rank}" if rank else "")
+        balance = money_fmt(net)
+        days_left = econ["money"] / -net if net < 0 else None
+        if days_left is not None and days_left < 100:
+            balance += f" — empty in ~{days_left:.0f} days"
+            self._info.config(fg="#8a1f1f")
+        else:
+            self._info.config(fg=FG)
         self._info.config(text=(
             f"{self._app.country_label(tag)} — treasury {treasury}   |   "
             f"factories {stats.factories} (level {stats.factory_levels}, {vfmt(stats.factory_workers)} workers)   |   "
-            f"daily balance {money_fmt(net)}"
+            f"daily balance {balance}"
         ))
         highlights = an.production_highlights(tag, top=3)
         if highlights:
@@ -1031,6 +1113,13 @@ class EconomyTab(tk.Frame, _ChartMixin):
         fig, ax, canvas = self._fig_right
         ax.clear()
         self._style_axes(ax, "Share of world production")
+        self._good_tip_data = []
+        if getattr(self, "_good_tip_cid", None) is not None:
+            try:
+                canvas.mpl_disconnect(self._good_tip_cid)
+            except Exception:
+                pass
+            self._good_tip_cid = None
         totals = an.world_production_totals()
         production = an.production_by_country().get(tag, {})
         shares = []
@@ -1044,15 +1133,44 @@ class EconomyTab(tk.Frame, _ChartMixin):
             keys = [k for k, _ in shares][-10:]
             values = [v * 100 for _, v in shares][-10:]
             colors = [reform_color(v) for v in values]
-            ax.barh(goods, values, color=colors)
+            bars = ax.barh(goods, values, color=colors)
+            self._good_tip_data = list(zip(bars, keys, values))
             for spine in ("left", "right", "top"):
                 ax.spines[spine].set_visible(False)
             ax.tick_params(axis="y", length=0, labelsize=8)
             ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _p: f"{x:.0f}%"))
             if gf is not None and HAS_MPL and Image is not None:
                 self._draw_good_icons(ax, keys, canvas)
+            self._good_tip_cid = canvas.mpl_connect(
+                "motion_notify_event", self._on_good_motion)
         fig.subplots_adjust(left=0.26)
         canvas.draw()
+
+    def _on_good_motion(self, event):
+        self._hide_good_tip()
+        if not getattr(self, "_good_tip_data", None):
+            return
+        for patch, key, value in self._good_tip_data:
+            if patch.contains_point((event.x, event.y)):
+                gf = self._app.game_files
+                name = gf.display_name(key) if gf is not None else key.replace("_", " ")
+                text = f"{name}: {value / 100:.1%} of world production"
+                self._show_good_tip(text, event.x, event.y)
+                break
+
+    def _show_good_tip(self, text, x, y):
+        widget = self._fig_right[2].get_tk_widget()
+        self._good_tip_window = tw = tk.Toplevel(widget)
+        tw.wm_overrideredirect(True)
+        tw.wm_geometry(f"+{widget.winfo_rootx() + x + 14}+{widget.winfo_rooty() + y + 10}")
+        tk.Label(tw, text=text, justify="left", bg="#fffbe8", fg=BUTTON,
+                 relief="solid", borderwidth=1, font=("Georgia", 9, "bold")).pack(ipadx=4, ipady=2)
+
+    def _hide_good_tip(self):
+        win = getattr(self, "_good_tip_window", None)
+        if win is not None:
+            win.destroy()
+            self._good_tip_window = None
 
     def _draw_good_icons(self, ax, keys, canvas):
         from matplotlib.offsetbox import AnnotationBbox, OffsetImage
@@ -1068,7 +1186,8 @@ class EconomyTab(tk.Frame, _ChartMixin):
             box = AnnotationBbox(
                 OffsetImage(_pil_to_array(img), resample=True),
                 (x, y), xycoords="data",
-                box_alignment=(1.0, 0.5), frameon=False)
+                box_alignment=(1.0, 0.5), frameon=False,
+                annotation_clip=False)
             ax.add_artist(box)
         canvas.draw()
 
@@ -1095,14 +1214,16 @@ class PoliticsTab(tk.Frame, _ChartMixin):
         tk.Label(top, text="Politics", font=("Georgia", 16, "bold"), fg=ACCENT, bg=BG).pack(side="left")
         self._selector = ttk.Combobox(top, state="readonly", width=40)
         self._selector.pack(side="left", padx=10)
-        self._selector.bind("<<ComboboxSelected>>", lambda e: self._draw())
+        self._selector.bind("<<ComboboxSelected>>", self._on_country_selected)
 
         info = tk.Frame(self, bg=PANEL)
         info.pack(fill="x", padx=8, pady=4)
         self._info = tk.Label(info, text="", justify="left", anchor="w", fg=FG, bg=PANEL,
                               font=("Georgia", 10))
         self._info.pack(fill="x", padx=8, pady=4)
-
+        self._issues_label = tk.Label(info, text="", justify="left", anchor="w",
+                                      fg=FG, bg=PANEL, font=("Georgia", 10))
+        self._issues_label.pack(fill="x", padx=8, pady=(0, 4))
         self._reforms_frame = tk.Frame(self, bg=BG)
         self._reforms_frame.pack(fill="x", padx=10, pady=(2, 4))
 
@@ -1113,6 +1234,11 @@ class PoliticsTab(tk.Frame, _ChartMixin):
         self._pop_ideology_fig = self.make_figure(charts, "Population ideology (%)", figsize=(5.6, 4.6))
         self._pop_ideology_fig[2].get_tk_widget().pack(side="left", fill="both", expand=True, padx=(4, 0))
 
+    def _on_country_selected(self, _event=None):
+        if hasattr(self, "_tags") and 0 <= self._selector.current() < len(self._tags):
+            self._app.selected_country_tag = self._tags[self._selector.current()]
+        self._draw()
+
     def refresh(self):
         an = self._app.latest()
         if an is None:
@@ -1120,8 +1246,12 @@ class PoliticsTab(tk.Frame, _ChartMixin):
         tags = an.ordered_country_tags()
         self._tags = tags
         self._selector["values"] = [f"{self._app.country_label(t)} ({t})" for t in tags]
-        player_idx = tags.index(an.player) if an.player in tags else 0
-        self._selector.current(player_idx)
+        chosen = self._app.selected_country_tag
+        if chosen in tags:
+            idx = tags.index(chosen)
+        else:
+            idx = tags.index(an.player) if an.player in tags else 0
+        self._selector.current(idx)
         self._draw()
 
     def _draw(self):
@@ -1138,6 +1268,17 @@ class PoliticsTab(tk.Frame, _ChartMixin):
             f"{self._app.country_label(tag)} — government: {stats.government.replace('_', ' ')}   |   "
             f"prestige {stats.prestige:,.1f}".replace(",", ".") + f"   |   infamy {stats.badboy:.1f}   |   plurality {stats.plurality:.0f}"
         ))
+        pop = an.pop_stats(tag)
+        if pop.by_issues and gf is not None:
+            names = gf.pop_issue_names()
+            total = sum(pop.by_issues.values()) or 1.0
+            top_issues = sorted(pop.by_issues.items(), key=lambda kv: -kv[1])[:8]
+            parts = [f"{names.get(i, 'Issue ' + i)} {v / total:.0%}"
+                     for i, v in top_issues]
+            self._issues_label.config(
+                text="Most important issues: " + "   ·   ".join(parts))
+        else:
+            self._issues_label.config(text="")
         self._render_reforms(stats.reforms, gf)
         ideol_colors = gf.ideology_colors() if gf is not None else {}
 
@@ -1163,7 +1304,6 @@ class PoliticsTab(tk.Frame, _ChartMixin):
         fig, ax, canvas = self._pop_ideology_fig
         ax.clear()
         self._style_axes(ax, "Population ideology (%)")
-        pop = an.pop_stats(tag)
         if pop.by_ideology:
             total = sum(pop.by_ideology.values()) or 1.0
             items = sorted(pop.by_ideology.items(), key=lambda kv: -kv[1])
@@ -1233,11 +1373,14 @@ class ImmigrationTab(tk.Frame, _ChartMixin):
                    "date": "Last arrival", "foreign": "Immigrant stock",
                    "total": "Province pop.", "share": "% foreign"}
         for col in columns:
-            self._tree.heading(col, text=headers[col])
+            self._tree.heading(col, text=headers[col],
+                               command=lambda c=col: self._sort_by(c))
             anchor = "center" if col == "share" else "w"
             width = 110 if col == "date" else 120 if col in ("foreign", "total") else 100
             self._tree.column(col, width=width, anchor=anchor)
         self._tree.pack(side="left", fill="both", expand=True)
+        self._tree.bind("<<TreeviewSelect>>", self._on_select_province)
+        self._rows_by_iid = {}
         sb = ttk.Scrollbar(wrap, orient="vertical", command=self._tree.yview)
         self._tree.configure(yscrollcommand=sb.set)
         sb.pack(side="right", fill="y")
@@ -1259,6 +1402,82 @@ class ImmigrationTab(tk.Frame, _ChartMixin):
             return
         self._snapshot = an.migration_snapshot()
         self._draw()
+
+    def _sort_by(self, col):
+        items = list(self._tree.get_children())
+        numeric = col in ("foreign", "total", "share")
+
+        def key(iid):
+            value = self._tree.set(iid, col)
+            if numeric:
+                digits = value.replace("%", "").replace(".", "", 1)
+                return float(digits) if digits.replace(".", "", 1).isdigit() else -1.0
+            return str(value).lower()
+
+        self._sort_dir = not getattr(self, "_sort_dir", False)
+        items.sort(key=key, reverse=self._sort_dir)
+        for index, iid in enumerate(items):
+            self._tree.move(iid, "", index)
+        arrow = " ▼" if self._sort_dir else " ▲"
+        headers = {"province": "Destination province", "owner": "Country",
+                   "date": "Last arrival", "foreign": "Immigrant stock",
+                   "total": "Province pop.", "share": "% foreign"}
+        for c in self._tree["columns"]:
+            self._tree.heading(c, text=headers[c] + (arrow if c == col else ""))
+
+    def _on_select_province(self, _event=None):
+        selection = self._tree.selection()
+        if not selection:
+            return
+        row = self._rows_by_iid.get(selection[0])
+        if row is None or not row.by_culture:
+            return
+        self._show_culture_pie(row)
+
+    def _show_culture_pie(self, row):
+        import colorsys
+        self._hide_culture_pie()
+        gf = self._app.game_files
+        name = gf.province_name(row.province_id) if gf is not None else f"Province {row.province_id}"
+        win = tk.Toplevel(self)
+        self._pie_window = win
+        win.title(f"Immigrants in {name}")
+        win.configure(bg=BG)
+        win.geometry("440x430")
+        win.transient(self.winfo_toplevel())
+        total = sum(row.by_culture.values()) or 1.0
+        items = sorted(row.by_culture.items(), key=lambda kv: -kv[1])
+        major = [(c, v) for c, v in items if v / total >= 0.02]
+        minor_count = sum(1 for c, v in items if v / total < 0.02)
+        rest = sum(v for c, v in items if v / total < 0.02)
+        if rest:
+            major.append((f"Other ({minor_count} smaller)", rest))
+        labels = [f"{c.replace('_', ' ').capitalize()} {v / total:.0%}" for c, v in major]
+        sizes = [v for _, v in major]
+        colors = []
+        for i in range(len(sizes)):
+            r, g, b = colorsys.hsv_to_rgb((i * 0.618034) % 1.0, 0.55, 0.85)
+            colors.append(f"#{int(r * 255):02x}{int(g * 255):02x}{int(b * 255):02x}")
+        fig = Figure(figsize=(4.0, 3.7), dpi=100, facecolor=BG)
+        ax = fig.add_subplot(111)
+        ax.set_facecolor(BG)
+        wedges, _texts = ax.pie(sizes, colors=colors, startangle=90,
+                                wedgeprops={"edgecolor": BG, "linewidth": 1})
+        share = row.foreign_population / row.total_population if row.total_population else 0.0
+        ax.set_title(f"{name} — {vfmt(row.foreign_population)} immigrants ({share:.0%} of province)",
+                     color=FG, fontsize=9)
+        fig.legend(wedges, labels, loc="lower center", ncol=2,
+                   frameon=False, labelcolor=FG, fontsize=8)
+        fig.subplots_adjust(top=0.86, bottom=0.28)
+        canvas = FigureCanvasTkAgg(fig, master=win)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill="both", expand=True, padx=6, pady=6)
+
+    def _hide_culture_pie(self):
+        win = getattr(self, "_pie_window", None)
+        if win is not None:
+            win.destroy()
+            self._pie_window = None
 
     def _date_within(self, value: str) -> bool:
         days = int(self._range_var.get())
@@ -1287,9 +1506,10 @@ class ImmigrationTab(tk.Frame, _ChartMixin):
                 vfmt(row.total_population), f"{share:.0f}%",
             )
             if photo is not None:
-                self._tree.insert("", "end", image=photo, values=values)
+                iid = self._tree.insert("", "end", image=photo, values=values)
             else:
-                self._tree.insert("", "end", values=values)
+                iid = self._tree.insert("", "end", values=values)
+            self._rows_by_iid[iid] = row
         total_today = sum(r.foreign_population for r in rows)
         self._info.config(text=(
             f"Save date {snap.date.replace('.', '/')} — {len(rows)} provinces received immigrants in the "
