@@ -97,3 +97,27 @@ def test_game_files_names_and_flags(analyzer_with_gf):
     assert names.get(analyzer_with_gf.player)
     img = gf.flag_image(analyzer_with_gf.player)
     assert img is not None and img.size == (64, 42)
+
+
+def test_migration_snapshot(analyzer):
+    snap = analyzer.migration_snapshot()
+    assert snap.date == analyzer.date
+    assert snap.destinations, "expected receiving provinces in the save"
+    for row in snap.destinations[:20]:
+        assert row.province_id > 0
+        assert len(row.owner) == 3
+        assert row.foreign_population > 0
+        assert row.total_population >= row.foreign_population
+    if snap.immigration_by_country:
+        tag, size = snap.immigration_by_country[0]
+        assert len(tag) == 3 and size > 0
+    assert snap.emigration_by_culture, "expected diaspora cultures"
+
+
+def test_pop_issue_names_from_install(analyzer_with_gf):
+    if analyzer_with_gf.game_files is None:
+        pytest.skip("VIC2_TEST_INSTALL not set")
+    names = analyzer_with_gf.game_files.pop_issue_names()
+    assert names.get("14") == "Jingoism"
+    assert names.get("1") == "Protectionism"
+    assert names.get("80") == "Good School system"
