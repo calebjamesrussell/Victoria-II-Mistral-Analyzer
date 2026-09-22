@@ -813,7 +813,7 @@ FACTORY_OUTPUT = {
 INCOME_CATEGORIES = [
     "taxes_poor", "taxes_middle", "taxes_rich", "tariffs", "gold",
     "national_stockpile", "industry_subsidies", "education",
-    "administration", "military",
+    "administration", "war_subsidies",
 ]
 
 EXPENSE_CATEGORIES = [

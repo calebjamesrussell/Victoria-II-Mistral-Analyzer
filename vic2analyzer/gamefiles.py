@@ -23,6 +23,20 @@ def _open_enc(path: str):
     return open(path, "r", encoding="cp1252", errors="replace", newline="")
 
 
+def _balanced_block(text: str, start: int) -> str:
+    """Text from ``start`` through the brace closing this block."""
+    depth = 1
+    for i in range(start, len(text)):
+        ch = text[i]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:i]
+    return text[start:]
+
+
 class GameFiles:
     """Lazy reader for Victoria II install reference data."""
 
@@ -40,6 +54,8 @@ class GameFiles:
         self._gov_flag_types: Optional[Dict[str, str]] = None
         self._pop_icons: Optional[Dict[str, Image.Image]] = None
         self._pop_sprite_map: Optional[Dict[str, int]] = None
+        self._religion_icons: Optional[Dict[str, Image.Image]] = None
+        self._religion_icon_map: Optional[Dict[str, int]] = None
         self._reform_options: Optional[Dict[str, List[str]]] = None
         self._issue_options: Optional[List[str]] = None
         self._pop_issue_names: Optional[Dict[str, str]] = None
@@ -302,14 +318,18 @@ class GameFiles:
         if self._start_cultures is not None:
             return self._start_cultures
         table: Dict[int, Dict[str, int]] = {}
-        folder = self._game_subdir("history", "pops")
+        base = self._game_subdir("history", "pops")
+        scenario = os.path.join(base, "1836.1.1")
+        folder = scenario if os.path.isdir(scenario) else base
         if not os.path.isdir(folder):
             self._start_cultures = table
             return table
-        for fname in sorted(os.listdir(folder)):
-            if not fname.lower().endswith(".txt"):
-                continue
-            path = os.path.join(folder, fname)
+        files: List[str] = []
+        for root, _dirs, names in os.walk(folder):
+            for fname in sorted(names):
+                if fname.lower().endswith(".txt"):
+                    files.append(os.path.join(root, fname))
+        for path in sorted(files):
             try:
                 with _open_enc(path) as fh:
                     text = fh.read()
@@ -504,7 +524,13 @@ class GameFiles:
     # ----------------------------------------------------------------- map
 
     def province_positions(self) -> Dict[int, tuple]:
-        """Province id -> (x, y) pixel position from map/positions.txt."""
+        """Province id -> (x, y) pixel position from map/positions.txt.
+
+        Provinces absent from positions.txt (about a sixth of them in
+        vanilla HoD) fall back to the centroid of their pixels in
+        map/provinces.bmp, matched by the unique color from
+        map/definition.csv.
+        """
         if self._province_positions is None:
             import re
             table: Dict[int, tuple] = {}
@@ -517,8 +543,41 @@ class GameFiles:
                         table[int(m.group(1))] = (float(m.group(2)), float(m.group(3)))
                 except OSError:
                     pass
+            missing = [pid for pid in self.provinces()
+                       if pid not in table and self.provinces()[pid][1:4] != (0, 0, 0)]
+            if missing:
+                table.update(self._province_centroids(missing))
             self._province_positions = table
         return self._province_positions
+
+    def _province_centroids(self, province_ids) -> Dict[int, tuple]:
+        """Province id -> mean (x, y) of its colored pixels in provinces.bmp."""
+        result: Dict[int, tuple] = {}
+        bmp_path = self._game_subdir("map", "provinces.bmp")
+        if not os.path.isfile(bmp_path):
+            return result
+        try:
+            import numpy
+            sheet = Image.open(bmp_path)
+            arr = numpy.asarray(sheet.convert("RGB"))
+        except (OSError, ValueError, ImportError):
+            return result
+        lookup = {r * 65536 + g * 256 + b: pid
+                   for pid in province_ids
+                   for r, g, b in (self.provinces()[pid][1:4],)}
+        height, width = arr.shape[0], arr.shape[1]
+        flat = arr.reshape(-1, 3).astype(numpy.int64)
+        codes = flat[:, 0] * 65536 + flat[:, 1] * 256 + flat[:, 2]
+        flat_index = numpy.arange(codes.shape[0])
+        flat_y, flat_x = numpy.divmod(flat_index, width)
+        counts = numpy.bincount(codes)
+        sum_x = numpy.bincount(codes, weights=flat_x)
+        sum_y = numpy.bincount(codes, weights=flat_y)
+        for code, pid in lookup.items():
+            if code < len(counts) and counts[code]:
+                result[pid] = (float(sum_x[code] / counts[code]),
+                               float(sum_y[code] / counts[code]))
+        return result
 
     def map_size(self) -> tuple:
         """(width, height) of the game map in pixels, from default.map."""
@@ -564,6 +623,58 @@ class GameFiles:
         if frame.size != tuple(size):
             frame = frame.resize(size, Image.LANCZOS)
         self._pop_icons[key] = frame
+        return frame
+
+    def religion_icon_map(self) -> Dict[str, int]:
+        """Religion name -> icon index, from common/religion.txt."""
+        if self._religion_icon_map is None:
+            import re
+            table: Dict[str, int] = {}
+            path = self._game_subdir("common", "religion.txt")
+            if os.path.isfile(path):
+                try:
+                    with _open_enc(path) as fh:
+                        text = fh.read()
+                    for m in re.finditer(r"(?m)^[ \t]+(\w+)\s*=\s*\{", text):
+                        name = m.group(1)
+                        seg = _balanced_block(text, m.end())
+                        ic = re.search(r"icon\s*=\s*(\d+)", seg)
+                        if ic and name not in table:
+                            table[name] = int(ic.group(1))
+                except OSError:
+                    pass
+            self._religion_icon_map = table
+        return self._religion_icon_map
+
+    def religion_icon(self, religion: str, size: tuple = (16, 16)) -> Optional[Image.Image]:
+        """The game's religion icon from gfx/interface/icon_religion.dds.
+
+        The sheet holds 14 frames of 32x32; religion.txt icon indices
+        are 1-based.
+        """
+        key = (religion, size)
+        if self._religion_icons is not None and key in self._religion_icons:
+            return self._religion_icons[key]
+        if self._religion_icons is None:
+            self._religion_icons = {}
+        icon_index = self.religion_icon_map().get(religion)
+        if icon_index is None or icon_index < 1:
+            return None
+        sheet_path = self._game_subdir("gfx", "interface", "icon_religion.dds")
+        if not os.path.isfile(sheet_path):
+            return None
+        try:
+            sheet = Image.open(sheet_path).convert("RGBA")
+        except (OSError, ValueError):
+            return None
+        frames = 14
+        frame_width = sheet.width // frames
+        index = icon_index - 1
+        frame = sheet.crop((index * frame_width, 0,
+                            (index + 1) * frame_width, sheet.height))
+        if frame.size != tuple(size):
+            frame = frame.resize(size, Image.LANCZOS)
+        self._religion_icons[key] = frame
         return frame
 
 
