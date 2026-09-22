@@ -1,0 +1,33 @@
+name: Build Windows exe
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install pillow matplotlib pyinstaller
+
+      - name: Run tests
+        run: python -m pytest tests/test_parser.py -q
+
+      - name: Build with PyInstaller
+        run: pyinstaller vic2-analyzer.spec
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vic2-analyzer-windows
+          path: dist/vic2-analyzer/
