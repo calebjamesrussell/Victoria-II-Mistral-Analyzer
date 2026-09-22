@@ -35,6 +35,7 @@ class GameFiles:
         # tag -> (r, g, b)
         self._country_colors: Optional[Dict[str, tuple]] = None
         self._good_names: Optional[Dict[str, str]] = None
+        self._goods: Optional[List[str]] = None
         self._cache_flags: Dict[str, Image.Image] = {}
         self._gov_flag_types: Optional[Dict[str, str]] = None
         self._pop_icons: Optional[Dict[str, Image.Image]] = None
@@ -121,12 +122,32 @@ class GameFiles:
             self._country_names = table
         return self._country_names
 
+    def goods(self) -> List[str]:
+        """Goods in sheet order, from common/goods.txt (vanilla fallback)."""
+        if self._goods is None:
+            goods: List[str] = []
+            path = self._game_subdir("common", "goods.txt")
+            if os.path.isfile(path):
+                import re
+                try:
+                    with _open_enc(path) as fh:
+                        for m in re.finditer(r"^\t(\w+)\s*=\s*\{", fh.read(), re.M):
+                            name = m.group(1)
+                            if name not in goods:
+                                goods.append(name)
+                except OSError:
+                    pass
+            if not goods:
+                goods = list(KNOWN_GOODS)
+            self._goods = goods
+        return self._goods
+
     def good_names(self) -> Dict[str, str]:
         """Internal good name (e.g. small_arms) -> display name."""
         if self._good_names is None:
             loc = self.localisation()
             table: Dict[str, str] = {}
-            for good in KNOWN_GOODS:
+            for good in self.goods():
                 table[good] = loc.get(good, good.replace("_", " ").title())
             self._good_names = table
         return self._good_names
@@ -303,18 +324,18 @@ class GameFiles:
     def good_icon(self, good: str, size: tuple = (20, 20)) -> Optional[Image.Image]:
         """The game's own trade-good icon from gfx/interface/resources_small.dds.
 
-        Frames are ordered as the goods appear in common/goods.txt; we map
-        via the index in KNOWN_GOODS, which matches the vanilla order.
+        The sheet holds 49 20px frames; frame 0 is blank and the goods in
+        common/goods.txt order map to frames 1..48.
         """
         key = (good, size)
         if getattr(self, "_good_icons", None) is None:
             self._good_icons = {}
         if key in self._good_icons:
             return self._good_icons[key]
-        try:
-            index = KNOWN_GOODS.index(good)
-        except ValueError:
+        goods = self.goods()
+        if good not in goods:
             return None
+        index = goods.index(good) + 1
         sheet_path = self._game_subdir("gfx", "interface", "resources_small.dds")
         if not os.path.isfile(sheet_path):
             return None
@@ -322,7 +343,7 @@ class GameFiles:
             sheet = Image.open(sheet_path).convert("RGBA")
         except (OSError, ValueError):
             return None
-        frames = 52
+        frames = 49
         frame_width = sheet.width // frames
         frame = sheet.crop((index * frame_width, 0,
                             (index + 1) * frame_width, sheet.height))
@@ -518,8 +539,8 @@ class GameFiles:
     def pop_icon(self, pop_type: str, size: tuple = (24, 24)) -> Optional[Image.Image]:
         """The game's own pop-type icon, read from gfx/interface/pops_small.dds.
 
-        The sheet is a single strip of 12 frames (32px wide); the game maps
-        pop types to frames via ``sprite = N`` in ``poptypes/*.txt``.
+        The sheet holds 12 frames of 32x64; the game maps pop types to
+        frames via ``sprite = N`` (1-based) in ``poptypes/*.txt``.
         """
         key = (pop_type, size)
         if self._pop_icons is not None and key in self._pop_icons:
@@ -527,7 +548,7 @@ class GameFiles:
         if self._pop_icons is None:
             self._pop_icons = {}
         sprite_index = self.pop_sprite_map().get(pop_type)
-        if sprite_index is None:
+        if sprite_index is None or sprite_index < 1:
             return None
         sheet_path = self._game_subdir("gfx", "interface", "pops_small.dds")
         if not os.path.isfile(sheet_path):
@@ -537,8 +558,9 @@ class GameFiles:
         except (OSError, ValueError):
             return None
         frame_width = sheet.width // 12
-        frame = sheet.crop((sprite_index * frame_width, 0,
-                            (sprite_index + 1) * frame_width, 32))
+        index = sprite_index - 1
+        frame = sheet.crop((index * frame_width, 0,
+                            (index + 1) * frame_width, sheet.height))
         if frame.size != tuple(size):
             frame = frame.resize(size, Image.LANCZOS)
         self._pop_icons[key] = frame
@@ -568,13 +590,13 @@ def _parse_pop_history(text: str):
 
 
 KNOWN_GOODS = [
-    "ammunition", "small_arms", "artillery", "canned_food", "aeroplanes",
-    "cotton", "dye", "wool", "silk", "coal", "sulphur", "iron", "timber",
-    "tropical_wood", "rubber", "oil", "precious_metal", "steel", "cement",
-    "machine_parts", "glass", "fuel", "fertilizer", "explosives",
-    "clipper_convoy", "steamer_convoy", "electric_gear", "telephones",
-    "radio", "automobiles", "tanks", "airplanes", "luxury_clothes",
-    "luxury_furniture", "furniture", "clothes", "fabric", "paper",
-    "liquor", "wine", "tobacco", "opium", "tea", "coffee", "sugar", "fruit",
-    "grain", "cattle", "fish", "ore", "coal", "industrial_rail_units",
+    "ammunition", "small_arms", "artillery", "canned_food", "barrels",
+    "aeroplanes", "cotton", "dye", "wool", "silk", "coal", "sulphur",
+    "iron", "timber", "tropical_wood", "rubber", "oil", "precious_metal",
+    "steel", "cement", "machine_parts", "glass", "fuel", "fertilizer",
+    "explosives", "clipper_convoy", "steamer_convoy", "electric_gear",
+    "fabric", "lumber", "paper", "cattle", "fish", "fruit", "grain",
+    "tobacco", "tea", "coffee", "opium", "automobiles", "telephones",
+    "wine", "liquor", "regular_clothes", "luxury_clothes", "furniture",
+    "luxury_furniture", "radio",
 ]

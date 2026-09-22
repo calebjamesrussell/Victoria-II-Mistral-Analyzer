@@ -807,7 +807,7 @@ class PopulationTab(tk.Frame, _ChartMixin):
             extent = tick.get_window_extent(renderer=renderer)
             x, y = ax.transData.inverted().transform(
                 (extent.x0 - 10, (extent.y0 + extent.y1) / 2.0))
-            img = gf.pop_icon(ptype, size=(22, 22))
+            img = gf.pop_icon(ptype, size=(13, 26))
             if img is None:
                 continue
             box = AnnotationBbox(
