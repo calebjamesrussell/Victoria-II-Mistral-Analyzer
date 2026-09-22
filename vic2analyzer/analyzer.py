@@ -63,6 +63,16 @@ class Battle:
 
 
 @dataclass
+class WarGoal:
+    date: str
+    casus_belli: str
+    actor: str
+    receiver: str
+    state_province_id: Optional[int] = None
+    country: str = ""
+
+
+@dataclass
 class War:
     name: str
     start_date: Optional[str]
@@ -74,6 +84,8 @@ class War:
     battles: List[Battle] = field(default_factory=list)
     casus_belli: str = ""
     action: Optional[str] = None
+    goals: List[WarGoal] = field(default_factory=list)
+    is_current: bool = False
 
     @property
     def attacker_losses(self) -> int:
@@ -218,6 +230,19 @@ class SaveAnalyzer:
                 tags.append(key)
         return sorted(set(tags))
 
+    def sovereign_tags(self) -> set:
+        """Tags that still exist as independent states: they own provinces."""
+        owners = self.province_owners()
+        return set(owners.values())
+
+    def ordered_country_tags(self) -> List[str]:
+        """All tags, sovereign countries first, then the rest alphabetically."""
+        sovereign = self.sovereign_tags()
+        tags = self.country_tags()
+        existing = sorted(t for t in tags if t in sovereign)
+        defunct = sorted(t for t in tags if t not in sovereign)
+        return existing + defunct
+
     def _province_blocks(self) -> List[Tuple[int, Dict[str, Any]]]:
         """Province blocks live at the top level of the save as numeric keys."""
         result: List[Tuple[int, Dict[str, Any]]] = []
@@ -234,59 +259,72 @@ class SaveAnalyzer:
 
     def wars(self) -> List[War]:
         wars: List[War] = []
-        for raw in _as_list(self.tree.get("previous_war")) + _as_list(self.tree.get("current_war")):
-            if not isinstance(raw, dict):
-                continue
-            name = str(raw.get("name", "Unknown war"))
-            start = end = None
-            attackers: List[str] = []
-            defenders: List[str] = []
-            battles: List[Battle] = []
-            cb = ""
-            history = raw.get("history")
-            if isinstance(history, list):
-                history = history[0] if history else None
-            if isinstance(history, dict):
-                for date, entry in history.items():
-                    if date == "__values__":
-                        continue
-                    date_str = str(date)
-                    entries = _as_list(entry)
-                    if not start:
-                        start = date_str
-                    end = date_str
-                    for item in entries:
-                        if not isinstance(item, dict):
+        for is_current, source in ((False, "previous_war"), (True, "current_war")):
+            for raw in _as_list(self.tree.get(source)):
+                if not isinstance(raw, dict):
+                    continue
+                name = str(raw.get("name", "Unknown war"))
+                start = end = None
+                attackers: List[str] = []
+                defenders: List[str] = []
+                battles: List[Battle] = []
+                goals: List[WarGoal] = []
+                cb = ""
+                history = raw.get("history")
+                if isinstance(history, list):
+                    history = history[0] if history else None
+                if isinstance(history, dict):
+                    for date, entry in history.items():
+                        if date == "__values__":
                             continue
-                        if "add_attacker" in item:
-                            attackers.append(str(item["add_attacker"]))
-                        if "add_defender" in item:
-                            defenders.append(str(item["add_defender"]))
-                        if "rem_attacker" in item:
-                            # participants that left the war are still
-                            # historical participants; don't drop them
-                            pass
-                        if "rem_defender" in item:
-                            pass
-                        wg = item.get("war_goal")
-                        if isinstance(wg, dict):
-                            cb = str(wg.get("casus_belli", cb))
-                        battle = item.get("battle")
-                        if isinstance(battle, dict):
-                            battles.append(self._make_battle(battle, date_str, name))
-            war = War(
-                name=name,
-                start_date=start,
-                end_date=end,
-                original_attacker=str(raw.get("original_attacker", attackers[0] if attackers else "---")),
-                original_defender=str(raw.get("original_defender", defenders[0] if defenders else "---")),
-                attackers=sorted(set(attackers)),
-                defenders=sorted(set(defenders)),
-                battles=battles,
-                casus_belli=cb,
-                action=str(raw.get("action", "") or ""),
-            )
-            wars.append(war)
+                        date_str = str(date)
+                        entries = _as_list(entry)
+                        if not start:
+                            start = date_str
+                        end = date_str
+                        for item in entries:
+                            if not isinstance(item, dict):
+                                continue
+                            if "add_attacker" in item:
+                                attackers.append(str(item["add_attacker"]))
+                            if "add_defender" in item:
+                                defenders.append(str(item["add_defender"]))
+                            if "rem_attacker" in item:
+                                # participants that left the war are still
+                                # historical participants; don't drop them
+                                pass
+                            if "rem_defender" in item:
+                                pass
+                            wg = item.get("war_goal")
+                            if isinstance(wg, dict):
+                                cb = str(wg.get("casus_belli", cb))
+                                spid = wg.get("state_province_id")
+                                goals.append(WarGoal(
+                                    date=date_str,
+                                    casus_belli=str(wg.get("casus_belli", "")),
+                                    actor=str(wg.get("actor", "")),
+                                    receiver=str(wg.get("receiver", "")),
+                                    state_province_id=int(spid) if isinstance(spid, (int, float)) else None,
+                                    country=str(wg.get("country", "")),
+                                ))
+                            battle = item.get("battle")
+                            if isinstance(battle, dict):
+                                battles.append(self._make_battle(battle, date_str, name))
+                war = War(
+                    name=name,
+                    start_date=start,
+                    end_date=end,
+                    original_attacker=str(raw.get("original_attacker", attackers[0] if attackers else "---")),
+                    original_defender=str(raw.get("original_defender", defenders[0] if defenders else "---")),
+                    attackers=sorted(set(attackers)),
+                    defenders=sorted(set(defenders)),
+                    battles=battles,
+                    casus_belli=cb,
+                    action=str(raw.get("action", "") or ""),
+                    goals=goals,
+                    is_current=is_current,
+                )
+                wars.append(war)
         return wars
 
     def _make_battle(self, battle: Dict[str, Any], date: str, war_name: str) -> Battle:
@@ -556,6 +594,22 @@ class SaveAnalyzer:
         self._production_cache = result
         return result
 
+    def treasury_rank(self, tag: str) -> int:
+        """1-based world rank of a country's treasury, 0 if unknown."""
+        treasuries = []
+        for t in self.country_tags():
+            block = self._country_block(t)
+            if not block:
+                continue
+            value = _first(block.get("money"))
+            if isinstance(value, (int, float)):
+                treasuries.append((t, float(value)))
+        treasuries.sort(key=lambda kv: -kv[1])
+        for rank, (t, _v) in enumerate(treasuries, start=1):
+            if t == tag:
+                return rank
+        return 0
+
     def world_production_totals(self) -> Dict[str, float]:
         totals: Dict[str, float] = {}
         for goods in self.production_by_country().values():
@@ -590,10 +644,10 @@ class SaveAnalyzer:
         Victoria II records per province only ``last_imigration`` — the date
         of the most recent arrival — so "today's" destinations are the
         provinces whose date matches (or is within a few days of) the save
-        date.  For each destination we size the immigrant community by the
-        population of pops whose culture is foreign to the owning country.
-        Cumulative emigration by culture is measured by diaspora: pops of a
-        culture living under states that do not accept them.
+        date.  An "immigrant" is a pop whose culture was not present in its
+        province at the 1836 game start (from the install's pop history);
+        when that is unavailable, fall back to cultures not accepted by
+        the owning country.
         """
         today = self.date
         if not today:
@@ -619,6 +673,17 @@ class SaveAnalyzer:
                     ok.add(culture)
             accepted[tag] = ok
 
+        start_cultures = None
+        if self.game_files is not None:
+            start_cultures = self.game_files.start_cultures()
+
+        def _is_immigrant(pid: int, tag: str, culture: str) -> bool:
+            if start_cultures is not None:
+                native = start_cultures.get(int(pid))
+                if native is not None:
+                    return culture not in native
+            return culture not in accepted.get(tag, set())
+
         provinces = dict(self._province_blocks())
         destination_rows: List[MigrationDestination] = []
         diaspora: Dict[str, float] = {}
@@ -627,7 +692,6 @@ class SaveAnalyzer:
             tag = owners.get(pid)
             if not tag:
                 continue
-            ok = accepted.get(tag, set())
             receiving = _date_no_later_than(prov.get("last_imigration"), 30)
             prov_foreign = 0.0
             prov_total = 0.0
@@ -640,7 +704,7 @@ class SaveAnalyzer:
                         continue
                     culture = self._pop_culture(pop)
                     prov_total += size
-                    if culture not in ok:
+                    if _is_immigrant(int(pid), tag, culture):
                         prov_foreign += size
                         stock = immigrant_stock.setdefault(tag, {})
                         stock[culture] = stock.get(culture, 0.0) + size

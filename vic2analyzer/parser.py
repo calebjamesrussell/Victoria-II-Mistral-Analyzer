@@ -104,9 +104,11 @@ class _Parser:
     (``state={...} state={...}``) are collected into lists.
     """
 
-    def __init__(self, text: str):
+    def __init__(self, text: str, progress=None):
         self.tokens = list(_Tokenizer(text).tokens())
         self.i = 0
+        self._progress = progress
+        self._total = len(self.tokens)
 
     def _peek(self) -> Optional[Tuple[str, str, int]]:
         return self.tokens[self.i] if self.i < len(self.tokens) else None
@@ -116,6 +118,8 @@ class _Parser:
         if tok is None:
             raise ClausewitzSyntaxError("unexpected end of input")
         self.i += 1
+        if self._progress is not None and self.i % 50000 == 0:
+            self._progress(min(self.i / self._total, 1.0))
         return tok
 
     def parse(self) -> Node:
@@ -224,13 +228,15 @@ class _Parser:
         return self._parse_block_body()
 
 
-def parse_string(text: str) -> Node:
+def parse_string(text: str, progress=None) -> Node:
     """Parse save text (already decoded) into a dictionary tree."""
-    return _Parser(text).parse()
+    return _Parser(text, progress).parse()
 
 
-def parse_file(path, encoding: str = "cp1252") -> Node:
+def parse_file(path, encoding: str = "cp1252", progress=None) -> Node:
     """Parse a .v2 save file. Returns a dictionary tree."""
     with codecs.open(path, "r", encoding=encoding, errors="replace") as fh:
         text = fh.read()
-    return parse_string(text)
+    if progress is not None:
+        progress(0.02)
+    return parse_string(text, progress)

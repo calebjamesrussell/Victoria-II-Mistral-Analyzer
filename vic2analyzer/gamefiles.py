@@ -44,6 +44,7 @@ class GameFiles:
         self._pop_issue_names: Optional[Dict[str, str]] = None
         self._ideology_colors: Optional[Dict[str, tuple]] = None
         self._province_positions: Optional[Dict[int, tuple]] = None
+        self._start_cultures: Optional[Dict[int, Dict[str, int]]] = None
 
     # ------------------------------------------------------------------ paths
 
@@ -270,6 +271,66 @@ class GameFiles:
 
     # ------------------------------------------------------------- pop icons
 
+    def start_cultures(self) -> Dict[int, Dict[str, int]]:
+        """Province id -> {culture: pop size} from history/pops/*.txt.
+
+        The 1836 scenario pop history defines which cultures were present
+        in each province at game start; anything else living there in a
+        save arrived later (immigration or conquest).
+        """
+        if self._start_cultures is not None:
+            return self._start_cultures
+        table: Dict[int, Dict[str, int]] = {}
+        folder = self._game_subdir("history", "pops")
+        if not os.path.isdir(folder):
+            self._start_cultures = table
+            return table
+        for fname in sorted(os.listdir(folder)):
+            if not fname.lower().endswith(".txt"):
+                continue
+            path = os.path.join(folder, fname)
+            try:
+                with _open_enc(path) as fh:
+                    text = fh.read()
+            except OSError:
+                continue
+            for pid, culture, size in _parse_pop_history(text):
+                prov = table.setdefault(int(pid), {})
+                prov[culture] = prov.get(culture, 0) + int(size)
+        self._start_cultures = table
+        return table
+
+    def good_icon(self, good: str, size: tuple = (20, 20)) -> Optional[Image.Image]:
+        """The game's own trade-good icon from gfx/interface/resources_small.dds.
+
+        Frames are ordered as the goods appear in common/goods.txt; we map
+        via the index in KNOWN_GOODS, which matches the vanilla order.
+        """
+        key = (good, size)
+        if getattr(self, "_good_icons", None) is None:
+            self._good_icons = {}
+        if key in self._good_icons:
+            return self._good_icons[key]
+        try:
+            index = KNOWN_GOODS.index(good)
+        except ValueError:
+            return None
+        sheet_path = self._game_subdir("gfx", "interface", "resources_small.dds")
+        if not os.path.isfile(sheet_path):
+            return None
+        try:
+            sheet = Image.open(sheet_path).convert("RGBA")
+        except (OSError, ValueError):
+            return None
+        frames = 52
+        frame_width = sheet.width // frames
+        frame = sheet.crop((index * frame_width, 0,
+                            (index + 1) * frame_width, sheet.height))
+        if frame.size != tuple(size):
+            frame = frame.resize(size, Image.LANCZOS)
+        self._good_icons[key] = frame
+        return frame
+
     def pop_sprite_map(self) -> Dict[str, int]:
         """Pop type name -> sprite index, from the install's poptypes/*.txt."""
         if self._pop_sprite_map is None:
@@ -482,6 +543,28 @@ class GameFiles:
             frame = frame.resize(size, Image.LANCZOS)
         self._pop_icons[key] = frame
         return frame
+
+
+def _parse_pop_history(text: str):
+    """Yield (province_id, culture, size) from a history/pops file.
+
+    Format: numeric province blocks containing pop entries like
+    ``farmers = { culture = swedish size = 3000 ... }``.  Only pops with
+    an explicit culture are recorded.
+    """
+    import re
+    prov_re = re.compile(r"^\s*(\d+)\s*=\s*\{", re.M)
+    matches = list(prov_re.finditer(text))
+    for i, m in enumerate(matches):
+        pid = int(m.group(1))
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        block = text[m.end():end]
+        for pm in re.finditer(r"\w+\s*=\s*\{([^{}]*)\}", block):
+            body = pm.group(1)
+            cm = re.search(r'culture\s*=\s*"?([\w ]+)"?', body)
+            sm = re.search(r"size\s*=\s*(\d+)", body)
+            if cm and sm:
+                yield pid, cm.group(1).strip(), int(sm.group(1))
 
 
 KNOWN_GOODS = [
