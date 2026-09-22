@@ -1,0 +1,43 @@
+name: Build Windows exe
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install pillow matplotlib pyinstaller pytest
+
+      - name: Run tests
+        run: python -m pytest tests/test_parser.py -q
+
+      - name: Build with PyInstaller
+        run: pyinstaller vic2-analyzer.spec
+
+      - name: Zip portable distribution
+        shell: pwsh
+        run: Compress-Archive -Path dist/vic2-analyzer/* -DestinationPath vic2-analyzer-windows.zip
+
+      - name: Delete previous rolling release
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release delete latest-build --cleanup-tag --yes
+
+      - name: Publish rolling release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create latest-build vic2-analyzer-windows.zip --title "Latest build" --notes "Automated build of the current main branch. Download vic2-analyzer-windows.zip, unzip anywhere and run vic2-analyzer.exe. This is a fan tool that ships no Paradox Interactive assets; the app reads names, flags and colors from your own Victoria II installation at runtime. Victoria II is (c) Paradox Interactive; this project is not affiliated with or endorsed by Paradox Interactive."

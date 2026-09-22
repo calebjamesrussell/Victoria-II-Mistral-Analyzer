@@ -47,12 +47,15 @@ registry, Steam and GOG locations; Linux/macOS Steam paths) and lists the
 save games in your Paradox Documents folder. You can also pick the install
 folder manually, and add `.v2` files from anywhere.
 
-### Windows installer (prebuilt)
+### Windows (prebuilt)
 
-Go to the repo's **Actions** tab → **Build Windows exe** → latest run →
-artifacts: a portable, self-contained `vic2-analyzer-windows.zip` built by
-PyInstaller. Unzip anywhere and run `vic2-analyzer.exe`. No Python install
-needed.
+Go to the repo's [**Releases** page](https://github.com/calebjamesrussell/Victoria-II-Mistral-Analyzer/releases)
+and download `vic2-analyzer-windows.zip` from the **Latest build** entry —
+a portable, self-contained distribution built by PyInstaller. Unzip
+anywhere and run `vic2-analyzer.exe`. No Python install needed.
+
+The latest build always reflects the current `main` branch; each release
+also lists the commit it was built from.
 
 ## Using it
 
@@ -68,10 +71,20 @@ installation.
 
 ## Intellectual property
 
-This project is a fan tool. It **contains no Paradox Interactive assets**.
-All country names, flags and colors are read live from the user's own
-Victoria II installation at runtime. Victoria II is © Paradox Interactive;
-this project is not affiliated with or endorsed by Paradox Interactive.
+This project is an unofficial fan tool. It **contains and distributes no
+Paradox Interactive assets** — no game files, art, flags, music or other
+copyrighted material are bundled in this repository or in the released
+downloads. All country names, flags and colors are read live from the
+user's own Victoria II installation at runtime.
+
+"Victoria II" and "Paradox Interactive" are trademarks of Paradox
+Interactive AB. This project is not affiliated with, endorsed by, or
+sponsored by Paradox Interactive, and is not an official product. The use
+of the game's name here is purely descriptive, to identify the save-game
+format this tool reads. Victoria II is © Paradox Interactive AB.
+
+If you are the trademark holder and have any concerns, please open an
+issue in this repository and it will be addressed promptly.
 
 ## Development
 
