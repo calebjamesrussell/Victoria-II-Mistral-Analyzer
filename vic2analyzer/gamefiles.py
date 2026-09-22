@@ -35,6 +35,7 @@ class GameFiles:
         # tag -> (r, g, b)
         self._country_colors: Optional[Dict[str, tuple]] = None
         self._good_names: Optional[Dict[str, str]] = None
+        self._goods: Optional[List[str]] = None
         self._cache_flags: Dict[str, Image.Image] = {}
         self._gov_flag_types: Optional[Dict[str, str]] = None
         self._pop_icons: Optional[Dict[str, Image.Image]] = None
@@ -44,6 +45,7 @@ class GameFiles:
         self._pop_issue_names: Optional[Dict[str, str]] = None
         self._ideology_colors: Optional[Dict[str, tuple]] = None
         self._province_positions: Optional[Dict[int, tuple]] = None
+        self._start_cultures: Optional[Dict[int, Dict[str, int]]] = None
 
     # ------------------------------------------------------------------ paths
 
@@ -120,12 +122,32 @@ class GameFiles:
             self._country_names = table
         return self._country_names
 
+    def goods(self) -> List[str]:
+        """Goods in sheet order, from common/goods.txt (vanilla fallback)."""
+        if self._goods is None:
+            goods: List[str] = []
+            path = self._game_subdir("common", "goods.txt")
+            if os.path.isfile(path):
+                import re
+                try:
+                    with _open_enc(path) as fh:
+                        for m in re.finditer(r"^\t(\w+)\s*=\s*\{", fh.read(), re.M):
+                            name = m.group(1)
+                            if name not in goods:
+                                goods.append(name)
+                except OSError:
+                    pass
+            if not goods:
+                goods = list(KNOWN_GOODS)
+            self._goods = goods
+        return self._goods
+
     def good_names(self) -> Dict[str, str]:
         """Internal good name (e.g. small_arms) -> display name."""
         if self._good_names is None:
             loc = self.localisation()
             table: Dict[str, str] = {}
-            for good in KNOWN_GOODS:
+            for good in self.goods():
                 table[good] = loc.get(good, good.replace("_", " ").title())
             self._good_names = table
         return self._good_names
@@ -269,6 +291,66 @@ class GameFiles:
 
 
     # ------------------------------------------------------------- pop icons
+
+    def start_cultures(self) -> Dict[int, Dict[str, int]]:
+        """Province id -> {culture: pop size} from history/pops/*.txt.
+
+        The 1836 scenario pop history defines which cultures were present
+        in each province at game start; anything else living there in a
+        save arrived later (immigration or conquest).
+        """
+        if self._start_cultures is not None:
+            return self._start_cultures
+        table: Dict[int, Dict[str, int]] = {}
+        folder = self._game_subdir("history", "pops")
+        if not os.path.isdir(folder):
+            self._start_cultures = table
+            return table
+        for fname in sorted(os.listdir(folder)):
+            if not fname.lower().endswith(".txt"):
+                continue
+            path = os.path.join(folder, fname)
+            try:
+                with _open_enc(path) as fh:
+                    text = fh.read()
+            except OSError:
+                continue
+            for pid, culture, size in _parse_pop_history(text):
+                prov = table.setdefault(int(pid), {})
+                prov[culture] = prov.get(culture, 0) + int(size)
+        self._start_cultures = table
+        return table
+
+    def good_icon(self, good: str, size: tuple = (20, 20)) -> Optional[Image.Image]:
+        """The game's own trade-good icon from gfx/interface/resources_small.dds.
+
+        The sheet holds 49 20px frames; frame 0 is blank and the goods in
+        common/goods.txt order map to frames 1..48.
+        """
+        key = (good, size)
+        if getattr(self, "_good_icons", None) is None:
+            self._good_icons = {}
+        if key in self._good_icons:
+            return self._good_icons[key]
+        goods = self.goods()
+        if good not in goods:
+            return None
+        index = goods.index(good) + 1
+        sheet_path = self._game_subdir("gfx", "interface", "resources_small.dds")
+        if not os.path.isfile(sheet_path):
+            return None
+        try:
+            sheet = Image.open(sheet_path).convert("RGBA")
+        except (OSError, ValueError):
+            return None
+        frames = 49
+        frame_width = sheet.width // frames
+        frame = sheet.crop((index * frame_width, 0,
+                            (index + 1) * frame_width, sheet.height))
+        if frame.size != tuple(size):
+            frame = frame.resize(size, Image.LANCZOS)
+        self._good_icons[key] = frame
+        return frame
 
     def pop_sprite_map(self) -> Dict[str, int]:
         """Pop type name -> sprite index, from the install's poptypes/*.txt."""
@@ -457,8 +539,8 @@ class GameFiles:
     def pop_icon(self, pop_type: str, size: tuple = (24, 24)) -> Optional[Image.Image]:
         """The game's own pop-type icon, read from gfx/interface/pops_small.dds.
 
-        The sheet is a single strip of 12 frames (32px wide); the game maps
-        pop types to frames via ``sprite = N`` in ``poptypes/*.txt``.
+        The sheet holds 12 frames of 32x64; the game maps pop types to
+        frames via ``sprite = N`` (1-based) in ``poptypes/*.txt``.
         """
         key = (pop_type, size)
         if self._pop_icons is not None and key in self._pop_icons:
@@ -466,7 +548,7 @@ class GameFiles:
         if self._pop_icons is None:
             self._pop_icons = {}
         sprite_index = self.pop_sprite_map().get(pop_type)
-        if sprite_index is None:
+        if sprite_index is None or sprite_index < 1:
             return None
         sheet_path = self._game_subdir("gfx", "interface", "pops_small.dds")
         if not os.path.isfile(sheet_path):
@@ -476,22 +558,45 @@ class GameFiles:
         except (OSError, ValueError):
             return None
         frame_width = sheet.width // 12
-        frame = sheet.crop((sprite_index * frame_width, 0,
-                            (sprite_index + 1) * frame_width, 32))
+        index = sprite_index - 1
+        frame = sheet.crop((index * frame_width, 0,
+                            (index + 1) * frame_width, sheet.height))
         if frame.size != tuple(size):
             frame = frame.resize(size, Image.LANCZOS)
         self._pop_icons[key] = frame
         return frame
 
 
+def _parse_pop_history(text: str):
+    """Yield (province_id, culture, size) from a history/pops file.
+
+    Format: numeric province blocks containing pop entries like
+    ``farmers = { culture = swedish size = 3000 ... }``.  Only pops with
+    an explicit culture are recorded.
+    """
+    import re
+    prov_re = re.compile(r"^\s*(\d+)\s*=\s*\{", re.M)
+    matches = list(prov_re.finditer(text))
+    for i, m in enumerate(matches):
+        pid = int(m.group(1))
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        block = text[m.end():end]
+        for pm in re.finditer(r"\w+\s*=\s*\{([^{}]*)\}", block):
+            body = pm.group(1)
+            cm = re.search(r'culture\s*=\s*"?([\w ]+)"?', body)
+            sm = re.search(r"size\s*=\s*(\d+)", body)
+            if cm and sm:
+                yield pid, cm.group(1).strip(), int(sm.group(1))
+
+
 KNOWN_GOODS = [
-    "ammunition", "small_arms", "artillery", "canned_food", "aeroplanes",
-    "cotton", "dye", "wool", "silk", "coal", "sulphur", "iron", "timber",
-    "tropical_wood", "rubber", "oil", "precious_metal", "steel", "cement",
-    "machine_parts", "glass", "fuel", "fertilizer", "explosives",
-    "clipper_convoy", "steamer_convoy", "electric_gear", "telephones",
-    "radio", "automobiles", "tanks", "airplanes", "luxury_clothes",
-    "luxury_furniture", "furniture", "clothes", "fabric", "paper",
-    "liquor", "wine", "tobacco", "opium", "tea", "coffee", "sugar", "fruit",
-    "grain", "cattle", "fish", "ore", "coal", "industrial_rail_units",
+    "ammunition", "small_arms", "artillery", "canned_food", "barrels",
+    "aeroplanes", "cotton", "dye", "wool", "silk", "coal", "sulphur",
+    "iron", "timber", "tropical_wood", "rubber", "oil", "precious_metal",
+    "steel", "cement", "machine_parts", "glass", "fuel", "fertilizer",
+    "explosives", "clipper_convoy", "steamer_convoy", "electric_gear",
+    "fabric", "lumber", "paper", "cattle", "fish", "fruit", "grain",
+    "tobacco", "tea", "coffee", "opium", "automobiles", "telephones",
+    "wine", "liquor", "regular_clothes", "luxury_clothes", "furniture",
+    "luxury_furniture", "radio",
 ]
