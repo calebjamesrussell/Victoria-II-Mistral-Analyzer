@@ -18,7 +18,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install pillow matplotlib pyinstaller
+          pip install pillow matplotlib pyinstaller pytest
 
       - name: Run tests
         run: python -m pytest tests/test_parser.py -q
