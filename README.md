@@ -11,17 +11,26 @@ Built with Mistral AI.
 
 ## What it shows
 
+- **Welcome map** — a world map drawn from the save itself: every owned
+  province colored by its owner's country color (read from your install),
+  with your own country highlighted in gold.
 - **Wars & Battles** — every war in the save's history with all recorded
-  battles: dates, locations, leaders, forces committed, losses per side,
-  and the deadliest engagements.
+  battles: dates, locations, forces committed, losses per side (sortable
+  columns, period-separated numbers) and flag chips for every attacker and
+  defender.
 - **Population** — total population, literacy, militancy and consciousness
-  for any country, broken down by pop type, culture and religion.
-- **Economy** — treasury, daily income vs. expenses, factory count/levels/
-  workforce, and the world market pool of all goods.
-- **Politics** — upper house composition, population ideology, reforms,
-  government type, prestige, infamy, plurality.
-- **Compare (over time)** — load several saves from the same campaign and
-  plot population, prestige and treasury across the whole campaign.
+  for any country, broken down by pop type (with the game's own pop icons
+  on the chart), culture and religion, plus the wealthiest and poorest
+  POPs and the issues the population cares about most.
+- **Economy** — treasury, factories and daily income by category, each
+  good's share of world production, and what your country is best at
+  (world leadership highlights).
+- **Politics** — upper house and population ideology in % with the game's
+  own ideology colors, reforms line by line and colored from red (worst)
+  to green (best), government type, prestige, infamy, plurality.
+- **Immigration** — for the save's current date: which provinces are
+  receiving immigrants right now (with the country's flag), immigration
+  hot spots by country, and the biggest diasporas by cumulative emigration.
 
 ## Quick start (from source)
 

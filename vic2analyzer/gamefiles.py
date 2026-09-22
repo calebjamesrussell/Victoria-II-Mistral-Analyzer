@@ -12,7 +12,7 @@ import glob
 import io
 import os
 import struct
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 from PIL import Image
 
@@ -39,6 +39,11 @@ class GameFiles:
         self._gov_flag_types: Optional[Dict[str, str]] = None
         self._pop_icons: Optional[Dict[str, Image.Image]] = None
         self._pop_sprite_map: Optional[Dict[str, int]] = None
+        self._reform_options: Optional[Dict[str, List[str]]] = None
+        self._issue_options: Optional[List[str]] = None
+        self._pop_issue_names: Optional[Dict[str, str]] = None
+        self._ideology_colors: Optional[Dict[str, tuple]] = None
+        self._province_positions: Optional[Dict[int, tuple]] = None
 
     # ------------------------------------------------------------------ paths
 
@@ -155,21 +160,44 @@ class GameFiles:
     # --------------------------------------------------------------- colors
 
     def country_colors(self) -> Dict[str, tuple]:
-        """Tag -> (r, g, b) from common/countries/*.txt color entries."""
+        """Tag (e.g. GEO) -> (r, g, b) from common/countries.txt + country files."""
         if self._country_colors is None:
-            table: Dict[str, tuple] = {}
-            pattern = self._game_subdir("common", "countries", "*.txt")
             import re
+            table: Dict[str, tuple] = {}
             color_re = re.compile(r"color\s*=\s*\{\s*(\d+)\s+(\d+)\s+(\d+)\s*\}")
-            for path in glob.glob(pattern):
-                tag = os.path.basename(path)[: -len(".txt")]
+            countries_txt = self._game_subdir("common", "countries.txt")
+            if os.path.isfile(countries_txt):
                 try:
-                    with _open_enc(path) as fh:
-                        m = color_re.search(fh.read())
+                    with _open_enc(countries_txt) as fh:
+                        for line in fh:
+                            line = line.strip()
+                            if "=" not in line or '"' not in line:
+                                continue
+                            tag = line.split("=")[0].strip()
+                            rel = line.split('"')[1]
+                            path = self._game_subdir("common", *rel.split("/"))
+                            if not os.path.isfile(path):
+                                continue
+                            try:
+                                with _open_enc(path) as fh:
+                                    m = color_re.search(fh.read())
+                            except OSError:
+                                continue
+                            if m and tag:
+                                table[tag] = tuple(int(c) for c in m.groups())
                 except OSError:
-                    continue
-                if m:
-                    table[tag] = tuple(int(c) for c in m.groups())
+                    pass
+            if not table:
+                pattern = self._game_subdir("common", "countries", "*.txt")
+                for path in glob.glob(pattern):
+                    tag = os.path.basename(path)[: -len(".txt")]
+                    try:
+                        with _open_enc(path) as fh:
+                            m = color_re.search(fh.read())
+                    except OSError:
+                        continue
+                    if m:
+                        table[tag] = tuple(int(c) for c in m.groups())
             self._country_colors = table
         return self._country_colors
 
@@ -259,6 +287,172 @@ class GameFiles:
                     table[ptype] = int(m.group(1))
             self._pop_sprite_map = table
         return self._pop_sprite_map
+
+    # --------------------------------------------------- reforms & issues
+
+    def reform_options(self) -> Dict[str, List[str]]:
+        """Reform name -> ordered option list (worst -> best), from issues.txt."""
+        if self._reform_options is None:
+            table: Dict[str, List[str]] = {}
+            path = self._game_subdir("common", "issues.txt")
+            if os.path.isfile(path):
+                import re
+                try:
+                    with _open_enc(path) as fh:
+                        text = fh.read()
+                except OSError:
+                    text = ""
+                for section in ("political_reforms", "social_reforms",
+                                "economic_reforms", "military_reforms"):
+                    m = re.search(section + r"\s*=\s*\{", text)
+                    if not m:
+                        continue
+                    start = m.end()
+                    depth = 1
+                    pos = start
+                    while pos < len(text) and depth:
+                        if text[pos] == "{":
+                            depth += 1
+                        elif text[pos] == "}":
+                            depth -= 1
+                        pos += 1
+                    block = text[start:pos]
+                    # reform keys are indented with a single tab; options
+                    # with two.  Walk the block line by line.
+                    current_reform = None
+                    for line in block.splitlines():
+                        m2 = re.match(r"\t([a-z_0-9]+)\s*=\s*\{\s*$", line)
+                        if m2:
+                            current_reform = m2.group(1)
+                            table.setdefault(current_reform, [])
+                            continue
+                        m3 = re.match(r"\t\t([a-z_0-9]+)\s*=\s*\{", line)
+                        if m3 and current_reform:
+                            table[current_reform].append(m3.group(1))
+            self._reform_options = table
+        return self._reform_options
+
+    def reform_level(self, reform: str, option: str) -> Optional[float]:
+        """0.0 (worst) .. 1.0 (best) for a reform option; None if unknown."""
+        opts = self.reform_options().get(reform)
+        if not opts or option not in opts:
+            return None
+        return opts.index(option) / (len(opts) - 1)
+
+    def issue_options(self) -> List[str]:
+        """All issue options in save-file order (index + 1 = numeric id).
+
+        Saves store pop issues as numeric ids (``issues = {14=7.8 15=6.1 ...}``);
+        the engine numbers every option from ``common/issues.txt`` in file
+        order: the 17 party-issue options first, then political reform
+        options, then social reform options (1..80 in Heart of Darkness).
+        """
+        if self._issue_options is None:
+            import re
+            options: List[str] = []
+            path = self._game_subdir("common", "issues.txt")
+            if os.path.isfile(path):
+                try:
+                    with _open_enc(path) as fh:
+                        lines = fh.read().splitlines()
+                except OSError:
+                    lines = []
+                section = False
+                current_issue = None
+                for line in lines:
+                    if line.startswith("economic_reforms") or line.startswith("military_reforms"):
+                        section = False
+                        current_issue = None
+                        continue
+                    if re.match(r"(party_issues|political_reforms|social_reforms)\s*=\s*\{", line):
+                        section = True
+                        current_issue = None
+                        continue
+                    if section and line.startswith("}"):
+                        section = False
+                        current_issue = None
+                        continue
+                    m = re.match(r"\t([a-z_0-9]+)\s*=\s*\{", line)
+                    if m:
+                        current_issue = m.group(1)
+                        continue
+                    m = re.match(r"\t\t([a-z_0-9]+)\s*=\s*\{", line)
+                    if m and current_issue:
+                        options.append(m.group(1))
+            self._issue_options = options
+        return self._issue_options
+
+    def pop_issue_names(self) -> Dict[str, str]:
+        """Numeric issue id ("14") -> localised display name ("Jingoism")."""
+        if self._pop_issue_names is None:
+            loc = self.localisation()
+            table: Dict[str, str] = {}
+            for idx, option in enumerate(self.issue_options(), start=1):
+                table[str(idx)] = loc.get(option, option.replace("_", " ").title())
+            self._pop_issue_names = table
+        return self._pop_issue_names
+
+    def display_name(self, key: str) -> str:
+        """Localised display name for any game key, prettified as fallback."""
+        if self._localisation is not None and key in self._localisation:
+            return self._localisation[key]
+        return self.localisation().get(key, key.replace("_", " ").title())
+
+    def ideology_colors(self) -> Dict[str, tuple]:
+        """Ideology name -> (r, g, b) from common/ideologies.txt."""
+        if self._ideology_colors is None:
+            import re
+            table: Dict[str, tuple] = {}
+            path = self._game_subdir("common", "ideologies.txt")
+            if os.path.isfile(path):
+                try:
+                    with _open_enc(path) as fh:
+                        text = fh.read()
+                    for m in re.finditer(r"\n\t([a-z_]+)\s*=\s*\{", text):
+                        name = m.group(1)
+                        cm = re.search(r"color\s*=\s*\{\s*(\d+)\s+(\d+)\s+(\d+)",
+                                       text[m.end():m.end() + 400])
+                        if cm:
+                            table[name] = tuple(int(c) for c in cm.groups())
+                except OSError:
+                    pass
+            self._ideology_colors = table
+        return self._ideology_colors
+
+    # ----------------------------------------------------------------- map
+
+    def province_positions(self) -> Dict[int, tuple]:
+        """Province id -> (x, y) pixel position from map/positions.txt."""
+        if self._province_positions is None:
+            import re
+            table: Dict[int, tuple] = {}
+            path = self._game_subdir("map", "positions.txt")
+            if os.path.isfile(path):
+                try:
+                    with _open_enc(path) as fh:
+                        text = fh.read()
+                    for m in re.finditer(r"(?m)^(\d+)\s*=\s*\{\s*unit=\s*\{\s*x=([\d.]+)\s*y=([\d.]+)", text):
+                        table[int(m.group(1))] = (float(m.group(2)), float(m.group(3)))
+                except OSError:
+                    pass
+            self._province_positions = table
+        return self._province_positions
+
+    def map_size(self) -> tuple:
+        """(width, height) of the game map in pixels, from default.map."""
+        path = self._game_subdir("map", "default.map")
+        if os.path.isfile(path):
+            try:
+                with _open_enc(path) as fh:
+                    text = fh.read()
+            except OSError:
+                return (5616, 2160)
+            import re
+            wm = re.search(r"width\s*=\s*(\d+)", text)
+            hm = re.search(r"height\s*=\s*(\d+)", text)
+            if wm and hm:
+                return (int(wm.group(1)), int(hm.group(1)))
+        return (5616, 2160)
 
     def pop_icon(self, pop_type: str, size: tuple = (24, 24)) -> Optional[Image.Image]:
         """The game's own pop-type icon, read from gfx/interface/pops_small.dds.

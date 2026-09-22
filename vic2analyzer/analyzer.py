@@ -96,6 +96,21 @@ class War:
 
 
 @dataclass
+class PopEntry:
+    province_id: int
+    pop_type: str
+    size: int
+    culture: str
+    religion: str
+    money_total: float
+    money_per_pop: float
+    literacy: float
+    militancy: float
+    consciousness: float
+    needs: str = ""
+
+
+@dataclass
 class PopBreakdown:
     size: int = 0
     literacy: float = 0.0
@@ -105,6 +120,27 @@ class PopBreakdown:
     by_culture: Dict[str, int] = field(default_factory=dict)
     by_ideology: Dict[str, float] = field(default_factory=dict)
     by_religion: Dict[str, int] = field(default_factory=dict)
+    by_issues: Dict[str, float] = field(default_factory=dict)
+    richest: List[PopEntry] = field(default_factory=list)
+    poorest: List[PopEntry] = field(default_factory=list)
+
+
+@dataclass
+class MigrationDestination:
+    province_id: int
+    owner: str
+    date: str
+    foreign_population: float
+    total_population: float
+
+
+@dataclass
+class MigrationSnapshot:
+    date: str = ""
+    destinations: List[MigrationDestination] = field(default_factory=list)
+    immigration_by_country: List[Tuple[str, float]] = field(default_factory=list)
+    top_immigrant_cultures: List[Tuple[str, float]] = field(default_factory=list)
+    emigration_by_culture: List[Tuple[str, float]] = field(default_factory=list)
 
 
 @dataclass
@@ -282,6 +318,15 @@ class SaveAnalyzer:
             battles.extend(war.battles)
         return battles
 
+    def province_owners(self) -> Dict[int, str]:
+        """Province id -> owner tag for every owned province in the save."""
+        owners: Dict[int, str] = {}
+        for pid, block in self._province_blocks():
+            owner = block.get("owner")
+            if isinstance(owner, str) and owner and owner != "---":
+                owners[pid] = owner
+        return owners
+
     # ------------------------------------------------------------- country
 
     def country_stats(self, tag: str) -> CountryStats:
@@ -379,6 +424,7 @@ class SaveAnalyzer:
         lit_sum = 0.0
         mil_sum = 0.0
         con_sum = 0.0
+        entries: List[PopEntry] = []
         for pid in province_ids:
             prov = provinces.get(int(pid))
             if prov is None:
@@ -406,11 +452,43 @@ class SaveAnalyzer:
                                 continue
                             key = IDEOLOGY_NAMES.get(iid, f"ideology_{iid}")
                             breakdown.by_ideology[key] = breakdown.by_ideology.get(key, 0.0) + float(share) * size / 100.0
+                    issues = pop.get("issues")
+                    if isinstance(issues, dict):
+                        for iid, share in issues.items():
+                            if iid == "__values__":
+                                continue
+                            breakdown.by_issues[iid] = breakdown.by_issues.get(iid, 0.0) + float(share) * size / 100.0
+                    money = float(_first(pop.get("money")) or 0)
+                    needs = ""
+                    if pop.get("luxury_needs", 0) is not None:
+                        needs = "luxury"
+                    entries.append(PopEntry(
+                        province_id=int(pid),
+                        pop_type=ptype,
+                        size=size,
+                        culture=culture,
+                        religion=religion,
+                        money_total=money,
+                        money_per_pop=money / size,
+                        literacy=float(pop.get("literacy", 0) or 0),
+                        militancy=float(pop.get("mil", 0) or 0),
+                        consciousness=float(pop.get("con", 0) or 0),
+                        needs=needs,
+                    ))
         breakdown.size = total
         if total:
             breakdown.literacy = lit_sum / total
             breakdown.militancy = mil_sum / total
             breakdown.consciousness = con_sum / total
+        entries.sort(key=lambda e: -e.money_per_pop)
+        breakdown.richest = entries[:5]
+        breakdown.poorest = [e for e in reversed(entries)
+                             if e.money_per_pop < entries[0].money_per_pop][:5] if entries else []
+        # poorest: take from the bottom, but skip zero-money unreconciled pops
+        zeroless = [e for e in entries if e.money_per_pop > 0]
+        if zeroless:
+            breakdown.poorest = zeroless[-5:]
+            breakdown.poorest.reverse()
         return breakdown
 
     @staticmethod
@@ -503,6 +581,95 @@ class SaveAnalyzer:
         # rank by world share: what the country is *best at* comes first
         entries.sort(key=lambda h: -h["share"])
         return entries[:top]
+
+    # ------------------------------------------------------------- migration
+
+    def migration_snapshot(self) -> MigrationSnapshot:
+        """Immigration activity around the save's current date.
+
+        Victoria II records per province only ``last_imigration`` — the date
+        of the most recent arrival — so "today's" destinations are the
+        provinces whose date matches (or is within a few days of) the save
+        date.  For each destination we size the immigrant community by the
+        population of pops whose culture is foreign to the owning country.
+        Cumulative emigration by culture is measured by diaspora: pops of a
+        culture living under states that do not accept them.
+        """
+        today = self.date
+        if not today:
+            return MigrationSnapshot()
+        year, month, day = (int(x) for x in today.split("."))
+        def _date_no_later_than(value: Any, max_days: int) -> bool:
+            try:
+                y, m, d = (int(x) for x in str(value).split("."))
+            except (ValueError, TypeError):
+                return False
+            return (y, m, d) >= (year, month, day - max_days) and (y, m, d) <= (year, month, day)
+
+        owners = self.province_owners()
+        accepted: Dict[str, set] = {}
+        for tag in set(owners.values()):
+            block = self._country_block(tag) or {}
+            ok = set()
+            primary = block.get("primary_culture")
+            if isinstance(primary, str):
+                ok.add(primary)
+            for culture in _as_list(block.get("culture")):
+                if isinstance(culture, str):
+                    ok.add(culture)
+            accepted[tag] = ok
+
+        provinces = dict(self._province_blocks())
+        destination_rows: List[MigrationDestination] = []
+        diaspora: Dict[str, float] = {}
+        immigrant_stock: Dict[str, Dict[str, float]] = {}
+        for pid, prov in provinces.items():
+            tag = owners.get(pid)
+            if not tag:
+                continue
+            ok = accepted.get(tag, set())
+            receiving = _date_no_later_than(prov.get("last_imigration"), 30)
+            prov_foreign = 0.0
+            prov_total = 0.0
+            for ptype in POP_TYPES:
+                for pop in _as_list(prov.get(ptype)):
+                    if not isinstance(pop, dict):
+                        continue
+                    size = float(pop.get("size", 0) or 0)
+                    if size <= 0:
+                        continue
+                    culture = self._pop_culture(pop)
+                    prov_total += size
+                    if culture not in ok:
+                        prov_foreign += size
+                        stock = immigrant_stock.setdefault(tag, {})
+                        stock[culture] = stock.get(culture, 0.0) + size
+                        diaspora[culture] = diaspora.get(culture, 0.0) + size
+            if receiving and prov_foreign > 0:
+                destination_rows.append(MigrationDestination(
+                    province_id=pid, owner=tag, date=str(prov.get("last_imigration")),
+                    foreign_population=prov_foreign, total_population=prov_total))
+
+        by_country: Dict[str, float] = {}
+        for row in destination_rows:
+            by_country[row.owner] = by_country.get(row.owner, 0.0) + row.foreign_population
+        top_sources = sorted(diaspora.items(), key=lambda kv: -kv[1])[:10]
+        top_cultures = sorted(
+            ((c, v) for stock in immigrant_stock.values() for c, v in stock.items()),
+            key=lambda kv: -kv[1])
+        seen = set()
+        unique_cultures = []
+        for culture, size in top_cultures:
+            if culture not in seen:
+                seen.add(culture)
+                unique_cultures.append((culture, size))
+        return MigrationSnapshot(
+            date=today,
+            destinations=sorted(destination_rows, key=lambda r: -r.foreign_population),
+            immigration_by_country=sorted(by_country.items(), key=lambda kv: -kv[1]),
+            top_immigrant_cultures=unique_cultures[:10],
+            emigration_by_culture=top_sources,
+        )
 
     def world_market(self) -> Dict[str, float]:
         market = self.tree.get("worldmarket")
