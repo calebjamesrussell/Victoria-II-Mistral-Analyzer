@@ -36,6 +36,9 @@ class GameFiles:
         self._country_colors: Optional[Dict[str, tuple]] = None
         self._good_names: Optional[Dict[str, str]] = None
         self._cache_flags: Dict[str, Image.Image] = {}
+        self._gov_flag_types: Optional[Dict[str, str]] = None
+        self._pop_icons: Optional[Dict[str, Image.Image]] = None
+        self._pop_sprite_map: Optional[Dict[str, int]] = None
 
     # ------------------------------------------------------------------ paths
 
@@ -175,35 +178,44 @@ class GameFiles:
 
     # ---------------------------------------------------------------- flags
 
-    def flag_path(self, tag: str, government: Optional[str] = None) -> Optional[str]:
-        """Best flag .tga for a tag, honouring government variants.
+    def government_flag_types(self) -> Dict[str, str]:
+        """Map government name (e.g. absolute_monarchy) -> flag suffix."""
+        if self._gov_flag_types is None:
+            table: Dict[str, str] = {}
+            path = self._game_subdir("common", "governments.txt")
+            if os.path.isfile(path):
+                import re
+                try:
+                    with _open_enc(path) as fh:
+                        text = fh.read()
+                    for match in re.finditer(r"([a-z_]+)\s*=\s*\{", text):
+                        gov_name = match.group(1)
+                        brace = 1
+                        pos = match.end()
+                        while pos < len(text) and brace:
+                            if text[pos] == "{":
+                                brace += 1
+                            elif text[pos] == "}":
+                                brace -= 1
+                            pos += 1
+                        block = text[match.end():pos]
+                        m = re.search(r"flagType\s*=\s*([A-Za-z_]+)", block)
+                        if m:
+                            table[gov_name] = m.group(1).lower()
+                except OSError:
+                    pass
+            self._gov_flag_types = table
+        return self._gov_flag_types
 
-        The save's ``government`` field is numeric; we map the common numeric
-        governments to the flag suffixes the game uses.
-        """
+    def flag_path(self, tag: str, government: Optional[str] = None) -> Optional[str]:
+        """Best flag .tga for a tag, honouring government variants."""
         base = self._game_subdir("gfx", "flags")
         if not os.path.isdir(base):
             return None
-        suffixes = []
         if government:
-            gov = str(government).lower()
-            govmap = {
-                "absolute_monarchy": "monarchy",
-                "prussian_constitutionalism": "monarchy",
-                "hms_government": "monarchy",
-                "democracy": "republic",
-                "presidential_dictatorship": "republic",
-                "proletarian_dictatorship": "communist",
-                "bourgeois_dictatorship": "republic",
-                "fascist_dictatorship": "fascist",
-                "anarcho_liberal": "republic",
-            }
-            suffix = govmap.get(gov)
+            suffix = self.government_flag_types().get(str(government))
             if suffix:
-                suffixes.append(suffix)
-        for suffix in suffixes:
-            for name in (f"{tag}_{suffix}.tga",):
-                p = os.path.join(base, name)
+                p = os.path.join(base, f"{tag}_{suffix}.tga")
                 if os.path.isfile(p):
                     return p
         p = os.path.join(base, f"{tag}.tga")
@@ -226,6 +238,56 @@ class GameFiles:
                 img = None
         self._cache_flags[key] = img
         return img
+
+
+    # ------------------------------------------------------------- pop icons
+
+    def pop_sprite_map(self) -> Dict[str, int]:
+        """Pop type name -> sprite index, from the install's poptypes/*.txt."""
+        if self._pop_sprite_map is None:
+            table: Dict[str, int] = {}
+            import re
+            pattern = self._game_subdir("poptypes", "*.txt")
+            for path in glob.glob(pattern):
+                ptype = os.path.basename(path)[: -len(".txt")]
+                try:
+                    with _open_enc(path) as fh:
+                        m = re.search(r"sprite\s*=\s*(\d+)", fh.read())
+                except OSError:
+                    continue
+                if m:
+                    table[ptype] = int(m.group(1))
+            self._pop_sprite_map = table
+        return self._pop_sprite_map
+
+    def pop_icon(self, pop_type: str, size: tuple = (24, 24)) -> Optional[Image.Image]:
+        """The game's own pop-type icon, read from gfx/interface/pops_small.dds.
+
+        The sheet is a single strip of 12 frames (32px wide); the game maps
+        pop types to frames via ``sprite = N`` in ``poptypes/*.txt``.
+        """
+        key = (pop_type, size)
+        if self._pop_icons is not None and key in self._pop_icons:
+            return self._pop_icons[key]
+        if self._pop_icons is None:
+            self._pop_icons = {}
+        sprite_index = self.pop_sprite_map().get(pop_type)
+        if sprite_index is None:
+            return None
+        sheet_path = self._game_subdir("gfx", "interface", "pops_small.dds")
+        if not os.path.isfile(sheet_path):
+            return None
+        try:
+            sheet = Image.open(sheet_path).convert("RGBA")
+        except (OSError, ValueError):
+            return None
+        frame_width = sheet.width // 12
+        frame = sheet.crop((sprite_index * frame_width, 0,
+                            (sprite_index + 1) * frame_width, 32))
+        if frame.size != tuple(size):
+            frame = frame.resize(size, Image.LANCZOS)
+        self._pop_icons[key] = frame
+        return frame
 
 
 KNOWN_GOODS = [

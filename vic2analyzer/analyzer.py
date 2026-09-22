@@ -73,6 +73,7 @@ class War:
     defenders: List[str]
     battles: List[Battle] = field(default_factory=list)
     casus_belli: str = ""
+    action: Optional[str] = None
 
     @property
     def attacker_losses(self) -> int:
@@ -162,6 +163,7 @@ class SaveAnalyzer:
         self.game_files = game_files
         self.date = str(tree.get("date", ""))
         self.player = str(tree.get("player", ""))
+        self._production_cache: Optional[Dict[str, Dict[str, float]]] = None
 
     # ------------------------------------------------------------- helpers
 
@@ -224,10 +226,12 @@ class SaveAnalyzer:
                             attackers.append(str(item["add_attacker"]))
                         if "add_defender" in item:
                             defenders.append(str(item["add_defender"]))
-                        if "rem_attacker" in item and str(item["rem_attacker"]) in attackers:
-                            attackers.remove(str(item["rem_attacker"]))
-                        if "rem_defender" in item and str(item["rem_defender"]) in defenders:
-                            defenders.remove(str(item["rem_defender"]))
+                        if "rem_attacker" in item:
+                            # participants that left the war are still
+                            # historical participants; don't drop them
+                            pass
+                        if "rem_defender" in item:
+                            pass
                         wg = item.get("war_goal")
                         if isinstance(wg, dict):
                             cb = str(wg.get("casus_belli", cb))
@@ -244,6 +248,7 @@ class SaveAnalyzer:
                 defenders=sorted(set(defenders)),
                 battles=battles,
                 casus_belli=cb,
+                action=str(raw.get("action", "") or ""),
             )
             wars.append(war)
         return wars
@@ -437,6 +442,68 @@ class SaveAnalyzer:
 
     # --------------------------------------------------------------- economy
 
+    def _good_production_of_pop(self, pop: Dict[str, Any]) -> Optional[Tuple[str, float]]:
+        """Goods produced by an artisan pop (production_type + current output)."""
+        ptype = pop.get("production_type")
+        if not isinstance(ptype, str) or not ptype.startswith("artisan_"):
+            return None
+        good = ptype[len("artisan_"):]
+        producing = pop.get("current_producing")
+        if not isinstance(producing, (int, float)):
+            producing = 0.0
+        return good, float(producing)
+
+    def production_by_country(self) -> Dict[str, Dict[str, float]]:
+        """Tag -> {good: supply reaching the market}.
+
+        Uses the save's own per-country ``saved_country_supply`` snapshot
+        (actual daily supply per good).  Fallbacks, merged in where supply
+        data is missing: artisan ``current_producing`` output, factory
+        ``produces`` and RGO ``last_income``.
+        """
+        if self._production_cache is not None:
+            return self._production_cache
+        result: Dict[str, Dict[str, float]] = {}
+        for tag in self.country_tags():
+            block = self._country_block(tag)
+            if not block:
+                continue
+            supply = _first(block.get("saved_country_supply"))
+            goods: Dict[str, float] = {}
+            if isinstance(supply, dict):
+                for good, amount in supply.items():
+                    if good != "__values__" and isinstance(amount, (int, float)):
+                        goods[good] = float(amount)
+            result[tag] = goods
+        self._production_cache = result
+        return result
+
+    def world_production_totals(self) -> Dict[str, float]:
+        totals: Dict[str, float] = {}
+        for goods in self.production_by_country().values():
+            for good, amount in goods.items():
+                totals[good] = totals.get(good, 0.0) + amount
+        return totals
+
+    def production_highlights(self, tag: str, top: int = 3) -> List[Dict[str, Any]]:
+        """The goods a country is best at, with its world share."""
+        country_goods = self.production_by_country().get(tag, {})
+        world = self.world_production_totals()
+        entries: List[Dict[str, Any]] = []
+        for good, amount in country_goods.items():
+            world_total = world.get(good, 0.0)
+            if world_total <= 0:
+                continue
+            entries.append({
+                "good": good,
+                "output": amount,
+                "world_total": world_total,
+                "share": amount / world_total,
+            })
+        # rank by world share: what the country is *best at* comes first
+        entries.sort(key=lambda h: -h["share"])
+        return entries[:top]
+
     def world_market(self) -> Dict[str, float]:
         market = self.tree.get("worldmarket")
         if isinstance(market, list):
@@ -493,6 +560,24 @@ def _flatten_scalars(value) -> Dict[str, float]:
     return {k: float(v) for k, v in value.items()
             if k != "__values__" and isinstance(v, (int, float, bool))}
 
+
+FACTORY_OUTPUT = {
+    "fabric_factory": "fabric", "cement_factory": "cement",
+    "ammunition_factory": "ammunition", "small_arms_factory": "small_arms",
+    "artillery_factory": "artillery", "canned_food_factory": "canned_food",
+    "glass_factory": "glass", "winery": "liquor", "liquor_distillery": "liquor",
+    "furniture_factory": "furniture", "clothing_factory": "clothes",
+    "paper_mill": "paper", "steel_factory": "steel",
+    "auto_factory": "automobiles", "aeroplane_factory": "aeroplanes",
+    "electric_gear_factory": "electric_gear", "radio_factory": "radio",
+    "telephone_factory": "telephones", "tank_factory": "tanks",
+    "explosives_factory": "explosives", "fuel_refinery": "fuel",
+    "fertilizer_plant": "fertilizer", "machine_parts_factory": "machine_parts",
+    "luxury_clothes_factory": "luxury_clothes",
+    "luxury_furniture_factory": "luxury_furniture",
+    "silk_factory": "silk", "dye_factory": "dye",
+    "lumber_mill": "lumber", "shipyard": "steamer_convoy",
+}
 
 INCOME_CATEGORIES = [
     "taxes_poor", "taxes_middle", "taxes_rich", "tariffs", "gold",

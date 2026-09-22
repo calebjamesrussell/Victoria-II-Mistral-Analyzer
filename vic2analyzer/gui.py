@@ -194,7 +194,15 @@ class App(tk.Tk):
     def flag_photo(self, tag: str, size=(48, 32)) -> Optional[object]:
         if self.game_files is None or ImageTk is None:
             return None
-        img = self.game_files.flag_image(tag, size=size)
+        government = None
+        an = self.latest()
+        if an is not None:
+            block = an._country_block(tag)
+            if isinstance(block, dict):
+                government = block.get("government")
+        img = self.game_files.flag_image(tag, government, size=size)
+        if img is None:
+            img = self.game_files.flag_image(tag, size=size)
         if img is None:
             return None
         photo = ImageTk.PhotoImage(img)
@@ -238,13 +246,18 @@ class WarsTab(tk.Frame):
     def __init__(self, app: App):
         super().__init__(app, bg=BG)
         self._app = app
+        self._filter_var = tk.BooleanVar(value=False)
         self._build()
-        app.bind_analyzer_hook = None
 
     def _build(self):
         top = tk.Frame(self, bg=BG)
         top.pack(fill="x", padx=8, pady=6)
         tk.Label(top, text="Wars & Battles", font=("Georgia", 16, "bold"), fg=ACCENT, bg=BG).pack(side="left")
+        self._filter_cb = ttk.Checkbutton(
+            top, text="Only wars with battles", variable=self._filter_var,
+            command=self.refresh,
+        )
+        self._filter_cb.pack(side="left", padx=12)
 
         columns = ("war", "dates", "attacker", "defender", "battles", "losses_a", "losses_d")
         headers = {"war": "War", "dates": "Dates", "attacker": "Attacker(s)", "defender": "Defender(s)",
@@ -255,7 +268,9 @@ class WarsTab(tk.Frame):
         for col in columns:
             self._tree.heading(col, text=headers[col])
             self._tree.column(col, width=180 if col in ("war", "attacker", "defender") else 90, anchor="w")
-        self._tree.column("war", width=280)
+        self._tree.column("war", width=270)
+        self._tree.column("attacker", width=190)
+        self._tree.column("defender", width=190)
         self._tree.pack(side="left", fill="both", expand=True)
         sb = ttk.Scrollbar(wrap, orient="vertical", command=self._tree.yview)
         self._tree.configure(yscrollcommand=sb.set)
@@ -264,8 +279,13 @@ class WarsTab(tk.Frame):
 
         detail = tk.Frame(self, bg=PANEL)
         detail.pack(fill="x", padx=8, pady=(4, 10))
-        self._detail_label = tk.Label(detail, text="Select a war to see its battles.", justify="left", anchor="w", fg=FG, bg=PANEL, font=("Georgia", 10))
-        self._detail_label.pack(fill="x", padx=8, pady=6)
+        self._detail_title = tk.Label(detail, text="Select a war to see its details.", justify="left",
+                                      anchor="w", fg=ACCENT, bg=PANEL, font=("Georgia", 12, "bold"))
+        self._detail_title.pack(fill="x", padx=8, pady=(6, 0))
+        self._flags_row = tk.Frame(detail, bg=PANEL)
+        self._flags_row.pack(fill="x", padx=8, pady=4)
+        self._detail_label = tk.Label(detail, text="", justify="left", anchor="w", fg=FG, bg=PANEL, font=("Georgia", 10))
+        self._detail_label.pack(fill="x", padx=8, pady=(0, 8))
 
     def refresh(self):
         an = self._app.latest()
@@ -275,7 +295,10 @@ class WarsTab(tk.Frame):
             return
         self._wars = an.wars()
         self._war_items = []
-        for counter, war in enumerate(sorted(self._wars, key=lambda w: w.start_date or "", reverse=True)):
+        wars = sorted(self._wars, key=lambda w: w.start_date or "", reverse=True)
+        if self._filter_var.get():
+            wars = [w for w in wars if w.battles]
+        for counter, war in enumerate(wars):
             losses_a = sum(b.attacker_losses for b in war.battles)
             losses_d = sum(b.defender_losses for b in war.battles)
             item = f"war{counter}"
@@ -283,23 +306,69 @@ class WarsTab(tk.Frame):
             self._tree.insert("", "end", iid=item, values=(
                 war.name,
                 f"{(war.start_date or '?').replace('.', '/')} – {(war.end_date or '?').replace('.', '/')}",
-                ", ".join(self._app.country_label(t) for t in war.attackers) or war.original_attacker,
-                ", ".join(self._app.country_label(t) for t in war.defenders) or war.original_defender,
+                self._side_names(war.attackers, war.original_attacker),
+                self._side_names(war.defenders, war.original_defender),
                 len(war.battles),
                 losses_a,
                 losses_d,
             ))
+        self._clear_flags_row()
+        self._detail_title.config(text="Select a war to see its details.")
+        self._detail_label.config(text="")
+
+    def _side_names(self, tags: List[str], original: str) -> str:
+        if tags:
+            return ", ".join(self._app.country_label(t) for t in tags)
+        if original and original != "---":
+            return self._app.country_label(original)
+        return "—"
+
+    def _clear_flags_row(self):
+        for child in self._flags_row.winfo_children():
+            child.destroy()
+
+    def _add_flag_chip(self, parent: tk.Frame, tag: str, highlight: bool = False) -> None:
+        chip = tk.Frame(parent, bg=PANEL2 if highlight else PANEL)
+        chip.pack(side="left", padx=3)
+        photo = self._app.flag_photo(tag, size=(48, 32))
+        if photo:
+            tk.Label(chip, image=photo, bg=PANEL).pack(padx=(4, 0))
+        name = self._app.country_label(tag)
+        font_kw = {}
+        if highlight:
+            font_kw = {"fg": ACCENT}
+        tk.Label(chip, text=name, bg=chip.cget("bg"), fg=ACCENT if highlight else FG,
+                 font=("Georgia", 8), **font_kw).pack(pady=(0, 3))
+
+    def _render_flags_row(self, war) -> None:
+        self._clear_flags_row()
+        attackers = war.attackers or ([war.original_attacker] if war.original_attacker != "---" else [])
+        defenders = war.defenders or ([war.original_defender] if war.original_defender != "---" else [])
+        for tag in attackers:
+            self._add_flag_chip(self._flags_row, tag, highlight=(tag == war.original_attacker))
+        if attackers or defenders:
+            vs = tk.Label(self._flags_row, text="vs", fg=FG, bg=PANEL, font=("Georgia", 11, "italic"))
+            vs.pack(side="left", padx=8)
+        for tag in defenders:
+            self._add_flag_chip(self._flags_row, tag, highlight=(tag == war.original_defender))
 
     def _on_select_war(self, _event=None):
         selection = self._tree.selection()
         if not selection or not hasattr(self, "_wars"):
             return
         war = next(w for item, w in self._war_items if item == selection[0])
+        self._detail_title.config(text=f"{war.name}   ({(war.start_date or '?').replace('.', '/')} – {(war.end_date or war.action or '?').replace('.', '/')})")
+        self._render_flags_row(war)
         if not war.battles:
-            self._detail_label.config(text="No recorded battles.")
+            self._detail_label.config(text=(
+                "No battles were recorded for this war.\n"
+                "Victoria II only records battles where armies actually met in combat — colonial and\n"
+                "concession wars are often resolved without a fight (the target capitulates, or the\n"
+                "wargoal is conceded without resistance). These are real, bloodless wars."
+            ))
             return
-        biggest = sorted(war.battles, key=lambda b: b.total_losses, reverse=True)[:5]
-        lines = [f"{war.name} — {len(war.battles)} battles, deadliest:", ""]
+        biggest = sorted(war.battles, key=lambda b: b.total_losses, reverse=True)[:8]
+        lines = [f"{len(war.battles)} battles — deadliest:", ""]
         for b in biggest:
             lines.append(
                 f"  {b.date.replace('.', '/')} {b.name}: {self._app.country_label(b.attacker)} vs "
@@ -341,6 +410,9 @@ class PopulationTab(tk.Frame, _ChartMixin):
         info.pack(fill="x", padx=8, pady=4)
         self._info = tk.Label(info, text="", justify="left", anchor="w", fg=FG, bg=PANEL, font=("Georgia", 10))
         self._info.pack(fill="x", padx=8, pady=6)
+
+        self._icons_row = tk.Frame(self, bg=BG)
+        self._icons_row.pack(fill="x", padx=8, pady=(0, 4))
 
         charts = tk.Frame(self, bg=BG)
         charts.pack(fill="both", expand=True, padx=8, pady=6)
@@ -384,8 +456,11 @@ class PopulationTab(tk.Frame, _ChartMixin):
         ax.set_title("Population by type", color=ACCENT)
         if pop.by_type:
             items = sorted(pop.by_type.items(), key=lambda kv: -kv[1])
-            ax.barh([k for k, _ in items][::-1], [v for _, v in items][::-1], color=ACCENT)
+            ax.barh([k.capitalize() for k, _ in items][::-1], [v for _, v in items][::-1], color=ACCENT)
+        ax.tick_params(axis="y", labelsize=10)
+        fig.subplots_adjust(left=0.22)
         canvas.draw()
+        self._render_pop_icons(pop)
         fig, ax, canvas = self._fig_right
         ax.clear()
         ax.set_facecolor(PANEL)
@@ -397,6 +472,26 @@ class PopulationTab(tk.Frame, _ChartMixin):
         values = [pop.literacy * 100, pop.militancy, pop.consciousness]
         ax.bar(metrics, values, color=["#7da87b", "#b0654f", "#6d8fa3"])
         canvas.draw()
+
+
+    def _render_pop_icons(self, pop) -> None:
+        """Row of the game's own pop-type icons with sizes."""
+        for child in self._icons_row.winfo_children():
+            child.destroy()
+        if not pop.by_type:
+            return
+        items = sorted(pop.by_type.items(), key=lambda kv: -kv[1])
+        for ptype, size in items:
+            chip = tk.Frame(self._icons_row, bg=BG)
+            chip.pack(side="left", padx=4)
+            if self._app.game_files is not None:
+                img = self._app.game_files.pop_icon(ptype, size=(22, 22))
+                if img is not None and ImageTk is not None:
+                    photo = ImageTk.PhotoImage(img)
+                    self._app._photo_refs.append(photo)
+                    tk.Label(chip, image=photo, bg=BG).pack()
+            tk.Label(chip, text=f"{ptype.capitalize()}\n{size:,}", bg=BG, fg=FG,
+                     font=("Georgia", 8), justify="center").pack()
 
 
 class EconomyTab(tk.Frame, _ChartMixin):
@@ -422,6 +517,10 @@ class EconomyTab(tk.Frame, _ChartMixin):
         self._info = tk.Label(self, text="", justify="left", anchor="w", fg=FG, bg=BG, font=("Georgia", 10))
         self._info.pack(fill="x", padx=10, pady=2)
 
+        self._highlights = tk.Label(self, text="", justify="left", anchor="w",
+                                    fg=ACCENT, bg=BG, font=("Georgia", 11, "bold"))
+        self._highlights.pack(fill="x", padx=10, pady=(2, 6))
+
     def refresh(self):
         an = self._app.latest()
         if an is None:
@@ -432,6 +531,16 @@ class EconomyTab(tk.Frame, _ChartMixin):
         player_idx = tags.index(an.player) if an.player in tags else 0
         self._selector.current(player_idx)
         self._draw()
+
+    @staticmethod
+    def _world_rank(an, good: str, tag: str) -> int:
+        producers = [(t, goods.get(good, 0.0))
+                     for t, goods in an.production_by_country().items()]
+        producers.sort(key=lambda kv: -kv[1])
+        for rank, (t, _amount) in enumerate(producers, start=1):
+            if t == tag:
+                return rank
+        return 0
 
     def _draw(self):
         an = self._app.latest()
@@ -449,6 +558,21 @@ class EconomyTab(tk.Frame, _ChartMixin):
             f"factories {stats.factories} (level {stats.factory_levels}, {stats.factory_workers:,} workers)   |   "
             f"daily balance £{net:+,.0f}"
         ))
+        highlights = an.production_highlights(tag, top=3)
+        if highlights:
+            parts = []
+            for h in highlights:
+                good = h["good"].replace("_", " ")
+                share = h["share"]
+                if share >= 0.25:
+                    parts.append(f"Produces {share:.0%} of the world's {good} — world leader!")
+                elif share >= 0.05:
+                    parts.append(f"{share:.0%} of world {good} (#{self._world_rank(an, h['good'], tag)})")
+                else:
+                    parts.append(f"{share:.1%} of world {good}")
+            self._highlights.config(text="★  " + "     ★  ".join(parts))
+        else:
+            self._highlights.config(text="")
         fig, ax, canvas = self._fig_left
         ax.clear()
         ax.set_facecolor(PANEL)

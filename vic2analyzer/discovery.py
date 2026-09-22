@@ -155,13 +155,29 @@ def find_install(configured: Optional[str] = None) -> Optional[str]:
 
 
 def _doc_dir() -> str:
+    """The user's Documents folder, robust across Windows/local setups."""
     if sys.platform == "win32":
         import ctypes.wintypes
         buf = ctypes.create_unicode_buffer(ctypes.wintypes.MAX_PATH)
-        ctypes.windll.shell32.SHGetFolderPathW(None, 5, None, 0, buf)
-        return buf.value
+        try:
+            ctypes.windll.shell32.SHGetFolderPathW(None, 5, None, 0, buf)
+            if buf.value:
+                return buf.value
+        except Exception:
+            pass
+        # OneDrive-redirected or custom Documents locations
+        for env in ("USERPROFILE", "HOME"):
+            base = os.environ.get(env)
+            if base:
+                return os.path.join(base, "Documents")
     home = os.path.expanduser("~")
-    return os.path.join(home, "Documents")
+    for candidate in (
+        os.path.join(home, "Documents"),
+        os.path.join(home, "documents"),
+    ):
+        if os.path.isdir(candidate):
+            return candidate
+    return home
 
 
 def find_save_dirs(install_dir: Optional[str] = None) -> List[str]:
