@@ -1051,6 +1051,7 @@ class EconomyTab(tk.Frame, _ChartMixin):
             ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _p: f"{x:.0f}%"))
             if gf is not None and HAS_MPL and Image is not None:
                 self._draw_good_icons(ax, keys, canvas)
+        fig.subplots_adjust(left=0.26)
         canvas.draw()
 
     def _draw_good_icons(self, ax, keys, canvas):
