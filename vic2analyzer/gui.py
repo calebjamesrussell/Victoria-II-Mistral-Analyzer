@@ -249,7 +249,6 @@ class App(tk.Tk):
             widget = getattr(self, f"_tab_{name}", None)
             if widget is not None:
                 widget.refresh()
-        self._tabs.select(1 if self.analyzers else 0)
 
     def latest(self) -> Optional[SaveAnalyzer]:
         if not self.analyzers:
@@ -342,7 +341,41 @@ class WelcomeTab(tk.Frame, _ChartMixin):
             self._ax = ax
             canvas.get_tk_widget().pack(fill="both", expand=True)
             self._canvas = canvas
+            self._base_xlim = None
+            self._base_ylim = None
+            canvas.mpl_connect("scroll_event", self._on_map_scroll)
         self._draw_map(an)
+
+    def _on_map_scroll(self, event):
+        if event.button == "up":
+            scale = 0.8
+        elif event.button == "down":
+            scale = 1.25
+        else:
+            return
+        ax = self._ax
+        if self._base_xlim is None or self._base_ylim is None:
+            return
+        if event.xdata is None or event.ydata is None:
+            cx = sum(ax.get_xlim()) / 2.0
+            cy = sum(ax.get_ylim()) / 2.0
+        else:
+            cx, cy = event.xdata, event.ydata
+        x0, x1 = ax.get_xlim()
+        y0, y1 = ax.get_ylim()
+        nx0 = cx + (x0 - cx) * scale
+        nx1 = cx + (x1 - cx) * scale
+        ny0 = cy + (y0 - cy) * scale
+        ny1 = cy + (y1 - cy) * scale
+        bx0, bx1 = self._base_xlim
+        by0, by1 = self._base_ylim
+        if nx1 - nx0 >= bx1 - bx0:
+            nx0, nx1 = bx0, bx1
+        if ny1 - ny0 >= by1 - by0:
+            ny0, ny1 = by0, by1
+        ax.set_xlim(nx0, nx1)
+        ax.set_ylim(ny0, ny1)
+        self._canvas.draw_idle()
 
     def _draw_map(self, an: SaveAnalyzer):
         ax = self._ax
@@ -359,6 +392,8 @@ class WelcomeTab(tk.Frame, _ChartMixin):
         width, height = gf.map_size()
         ax.set_xlim(0, width)
         ax.set_ylim(0, height)
+        self._base_xlim = (0, width)
+        self._base_ylim = (0, height)
         ax.set_facecolor("#c8d8e8")
         colors = gf.country_colors()
         player = an.player
@@ -605,7 +640,7 @@ class PopulationTab(tk.Frame, _ChartMixin):
         bottom.pack(fill="both", expand=True, padx=8, pady=(0, 6))
         self._fig_left = self.make_figure(bottom, "Population by type", figsize=(5.4, 4.6))
         self._fig_left[2].get_tk_widget().pack(side="left", fill="both", expand=True, padx=(0, 4))
-        self._fig_right = self.make_figure(bottom, "Literacy / militancy / consciousness", figsize=(4.2, 4.6))
+        self._fig_right = self.make_figure(bottom, "Population by religion", figsize=(4.2, 4.6))
         self._fig_right[2].get_tk_widget().pack(side="left", fill="both", expand=True, padx=(4, 0))
 
         self._wealth_panel = tk.Frame(bottom, bg=PANEL)
@@ -634,11 +669,37 @@ class PopulationTab(tk.Frame, _ChartMixin):
         self._selector.current(player_idx)
         self._draw()
 
-    def _pop_name(self, entry) -> str:
+    def _pop_line(self, entry, wealthiest: bool = False) -> str:
         gf = self._app.game_files
         prov = gf.province_name(entry.province_id) if gf is not None else entry.province_id
-        return (f"{entry.pop_type.capitalize()} — {entry.culture.capitalize()} in {prov}: "
+        line = (f"  {entry.pop_type.capitalize()} — {entry.culture.capitalize()} in {prov}: "
                 f"{vfmt(entry.size)} pops, {money_fmt(entry.money_per_pop)} each")
+        if wealthiest:
+            line += f" ({money_fmt(entry.money_total)} total)"
+        else:
+            line += f", literacy {entry.literacy:.0%}, militancy {entry.militancy:.2f}"
+        return line
+
+    def _draw_pop_icons(self, ax, items, canvas):
+        gf = self._app.game_files
+        if gf is None or not HAS_MPL or Image is None:
+            return
+        from matplotlib.offsetbox import AnnotationBbox, OffsetImage
+        renderer = canvas.get_renderer()
+        for row, (ptype, _size) in enumerate(items):
+            tick = ax.get_yticklabels()[row]
+            extent = tick.get_window_extent(renderer=renderer)
+            x, y = ax.transData.inverted().transform(
+                (extent.x0 - 10, (extent.y0 + extent.y1) / 2.0))
+            img = gf.pop_icon(ptype, size=(22, 22))
+            if img is None:
+                continue
+            box = AnnotationBbox(
+                OffsetImage(_pil_to_array(img), resample=True),
+                (x, y), xycoords="data",
+                box_alignment=(1.0, 0.5), frameon=False)
+            ax.add_artist(box)
+        canvas.draw()
 
     def _draw(self):
         an = self._app.latest()
@@ -670,36 +731,43 @@ class PopulationTab(tk.Frame, _ChartMixin):
             for spine in ("left", "right", "top"):
                 ax.spines[spine].set_visible(False)
             ax.ticklabel_format(axis="x", useOffset=False, style="plain")
-            if gf is not None and HAS_MPL and Image is not None:
-                from matplotlib.offsetbox import AnnotationBbox, OffsetImage
-                for row, (ptype, _size) in enumerate(items[::-1]):
-                    img = gf.pop_icon(ptype, size=(22, 22))
-                    if img is None:
-                        continue
-                    box = AnnotationBbox(
-                        OffsetImage(_pil_to_array(img), resample=True),
-                        (-0.02, row), xycoords=("axes fraction", "data"),
-                        box_alignment=(1.0, 0.5), frameon=False)
-                    ax.add_artist(box)
-        fig.subplots_adjust(left=0.30)
+            ax.set_xlim(0, max(sizes) * 1.18)
+            for row, size in enumerate(sizes):
+                ax.annotate(vfmt(size), (size, row), xytext=(4, 0),
+                            textcoords="offset points", va="center", ha="left",
+                            fontsize=8, color=FG)
+        fig.subplots_adjust(left=0.34)
         canvas.draw()
+        if items:
+            self._draw_pop_icons(ax, items[::-1], canvas)
 
         fig, ax, canvas = self._fig_right
         ax.clear()
-        self._style_axes(ax, "Literacy / militancy / consciousness")
-        metrics = ("Literacy %", "Avg militancy", "Avg consciousness")
-        values = [pop.literacy * 100, pop.militancy, pop.consciousness]
-        ax.bar(metrics, values, color=["#5d7a4a", "#8a3a2a", "#4a5d7a"])
-        ax.tick_params(axis="x", labelsize=8, labelrotation=12)
+        self._style_axes(ax, "Population by religion")
+        religions = sorted(pop.by_religion.items(), key=lambda kv: -kv[1])[:8][::-1]
+        if religions:
+            names = [k.capitalize() for k, _ in religions]
+            sizes = [v for _, v in religions]
+            ax.barh(range(len(names)), sizes, color="#5d7a4a")
+            ax.set_yticks(range(len(names)))
+            ax.set_yticklabels(names)
+            ax.tick_params(axis="y", length=0)
+            for spine in ("left", "right", "top"):
+                ax.spines[spine].set_visible(False)
+            ax.ticklabel_format(axis="x", useOffset=False, style="plain")
+            ax.set_xlim(0, max(sizes) * 1.18)
+            for row, size in enumerate(sizes):
+                ax.annotate(vfmt(size), (size, row), xytext=(4, 0),
+                            textcoords="offset points", va="center", ha="left",
+                            fontsize=8, color=FG)
+        fig.subplots_adjust(left=0.30)
         canvas.draw()
 
         rich_lines = ["Wealthiest POPs (money per pop):"]
-        rich_lines += [f"  {money_fmt(e.money_per_pop):>14}  {self._pop_name(e)[len(e.pop_type) + 1:]}"
-                       for e in pop.richest[:5]]
+        rich_lines += [self._pop_line(e, wealthiest=True) for e in pop.richest[:5]]
         self._wealth_rich.config(text="\n".join(rich_lines))
         poor_lines = ["Poorest POPs (money per pop):"]
-        poor_lines += [f"  {money_fmt(e.money_per_pop):>14}  {self._pop_name(e)[len(e.pop_type) + 1:]}"
-                       for e in pop.poorest[:5]]
+        poor_lines += [self._pop_line(e) for e in pop.poorest[:5]]
         self._wealth_poor.config(text="\n".join(poor_lines))
 
         if pop.by_issues and gf is not None:

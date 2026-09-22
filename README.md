@@ -13,7 +13,8 @@ Built with Mistral AI.
 
 - **Welcome map** — a world map drawn from the save itself: every owned
   province colored by its owner's country color (read from your install),
-  with your own country highlighted in gold.
+  with your own country highlighted in gold. Scroll the mouse wheel over
+  the map to zoom in and out.
 - **Wars & Battles** — every war in the save's history with all recorded
   battles: dates, locations, forces committed, losses per side (sortable
   columns, period-separated numbers) and flag chips for every attacker and
