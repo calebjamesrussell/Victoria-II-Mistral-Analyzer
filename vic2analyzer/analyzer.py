@@ -144,6 +144,7 @@ class MigrationDestination:
     date: str
     foreign_population: float
     total_population: float
+    by_culture: Dict[str, float] = field(default_factory=dict)
 
 
 @dataclass
@@ -695,6 +696,7 @@ class SaveAnalyzer:
             receiving = _date_no_later_than(prov.get("last_imigration"), 30)
             prov_foreign = 0.0
             prov_total = 0.0
+            prov_cultures: Dict[str, float] = {}
             for ptype in POP_TYPES:
                 for pop in _as_list(prov.get(ptype)):
                     if not isinstance(pop, dict):
@@ -706,13 +708,15 @@ class SaveAnalyzer:
                     prov_total += size
                     if _is_immigrant(int(pid), tag, culture):
                         prov_foreign += size
+                        prov_cultures[culture] = prov_cultures.get(culture, 0.0) + size
                         stock = immigrant_stock.setdefault(tag, {})
                         stock[culture] = stock.get(culture, 0.0) + size
                         diaspora[culture] = diaspora.get(culture, 0.0) + size
             if receiving and prov_foreign > 0:
                 destination_rows.append(MigrationDestination(
                     province_id=pid, owner=tag, date=str(prov.get("last_imigration")),
-                    foreign_population=prov_foreign, total_population=prov_total))
+                    foreign_population=prov_foreign, total_population=prov_total,
+                    by_culture=prov_cultures))
 
         by_country: Dict[str, float] = {}
         for row in destination_rows:

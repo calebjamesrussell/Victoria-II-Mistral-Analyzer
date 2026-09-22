@@ -1379,6 +1379,8 @@ class ImmigrationTab(tk.Frame, _ChartMixin):
             width = 110 if col == "date" else 120 if col in ("foreign", "total") else 100
             self._tree.column(col, width=width, anchor=anchor)
         self._tree.pack(side="left", fill="both", expand=True)
+        self._tree.bind("<<TreeviewSelect>>", self._on_select_province)
+        self._rows_by_iid = {}
         sb = ttk.Scrollbar(wrap, orient="vertical", command=self._tree.yview)
         self._tree.configure(yscrollcommand=sb.set)
         sb.pack(side="right", fill="y")
@@ -1423,6 +1425,60 @@ class ImmigrationTab(tk.Frame, _ChartMixin):
         for c in self._tree["columns"]:
             self._tree.heading(c, text=headers[c] + (arrow if c == col else ""))
 
+    def _on_select_province(self, _event=None):
+        selection = self._tree.selection()
+        if not selection:
+            return
+        row = self._rows_by_iid.get(selection[0])
+        if row is None or not row.by_culture:
+            return
+        self._show_culture_pie(row)
+
+    def _show_culture_pie(self, row):
+        import colorsys
+        self._hide_culture_pie()
+        gf = self._app.game_files
+        name = gf.province_name(row.province_id) if gf is not None else f"Province {row.province_id}"
+        win = tk.Toplevel(self)
+        self._pie_window = win
+        win.title(f"Immigrants in {name}")
+        win.configure(bg=BG)
+        win.geometry("440x430")
+        win.transient(self.winfo_toplevel())
+        total = sum(row.by_culture.values()) or 1.0
+        items = sorted(row.by_culture.items(), key=lambda kv: -kv[1])
+        major = [(c, v) for c, v in items if v / total >= 0.02]
+        minor_count = sum(1 for c, v in items if v / total < 0.02)
+        rest = sum(v for c, v in items if v / total < 0.02)
+        if rest:
+            major.append((f"Other ({minor_count} smaller)", rest))
+        labels = [f"{c.replace('_', ' ').capitalize()} {v / total:.0%}" for c, v in major]
+        sizes = [v for _, v in major]
+        colors = []
+        for i in range(len(sizes)):
+            r, g, b = colorsys.hsv_to_rgb((i * 0.618034) % 1.0, 0.55, 0.85)
+            colors.append(f"#{int(r * 255):02x}{int(g * 255):02x}{int(b * 255):02x}")
+        fig = Figure(figsize=(4.0, 3.7), dpi=100, facecolor=BG)
+        ax = fig.add_subplot(111)
+        ax.set_facecolor(BG)
+        wedges, _texts = ax.pie(sizes, colors=colors, startangle=90,
+                                wedgeprops={"edgecolor": BG, "linewidth": 1})
+        share = row.foreign_population / row.total_population if row.total_population else 0.0
+        ax.set_title(f"{name} — {vfmt(row.foreign_population)} immigrants ({share:.0%} of province)",
+                     color=FG, fontsize=9)
+        fig.legend(wedges, labels, loc="lower center", ncol=2,
+                   frameon=False, labelcolor=FG, fontsize=8)
+        fig.subplots_adjust(top=0.86, bottom=0.28)
+        canvas = FigureCanvasTkAgg(fig, master=win)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill="both", expand=True, padx=6, pady=6)
+
+    def _hide_culture_pie(self):
+        win = getattr(self, "_pie_window", None)
+        if win is not None:
+            win.destroy()
+            self._pie_window = None
+
     def _date_within(self, value: str) -> bool:
         days = int(self._range_var.get())
         try:
@@ -1450,9 +1506,10 @@ class ImmigrationTab(tk.Frame, _ChartMixin):
                 vfmt(row.total_population), f"{share:.0f}%",
             )
             if photo is not None:
-                self._tree.insert("", "end", image=photo, values=values)
+                iid = self._tree.insert("", "end", image=photo, values=values)
             else:
-                self._tree.insert("", "end", values=values)
+                iid = self._tree.insert("", "end", values=values)
+            self._rows_by_iid[iid] = row
         total_today = sum(r.foreign_population for r in rows)
         self._info.config(text=(
             f"Save date {snap.date.replace('.', '/')} — {len(rows)} provinces received immigrants in the "
