@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vic2-mistral-analyzer"
+version = "0.1.0"
+description = "Desktop analyzer for Victoria II (Heart of Darkness) save games: wars, battles, economy, population over time."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "pillow>=9.0",
+    "matplotlib>=3.5",
+]
+
+[project.gui-scripts]
+vic2-analyzer = "vic2analyzer.gui:main"
+
+[tool.setuptools]
+packages = ["vic2analyzer"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
